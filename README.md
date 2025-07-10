@@ -10,35 +10,38 @@ Sistema backend completo que integra gestión de datos empresariales con predicc
 HACKADISC/
 └── BackEnd-HackADisc/            # Proyecto completo
     ├── README.md                 # Este archivo
-    ├── main.py                   # API FastAPI integrada
-    ├── database.py               # Configuración de base de datos
-    ├── models.py                 # Modelos SQLAlchemy
-    ├── etl.py                    # ETL para procesar datos
-    ├── requirements.txt          # Dependencias Python
-    ├── ventas.csv                # Datos originales de ventas
-    ├── facturas.csv              # Datos originales de facturas  
-    ├── estados.csv               # Datos originales de estados
-    ├── modelo_hibrido.pkl        # Modelo ML entrenado
-    ├── modelo_hibrido_metadata.pkl # Metadatos del modelo
-    ├── scaler_hibrido.pkl        # Scaler para normalización
-    ├── .git/                     # Control de versiones
-    ├── .gitignore                # Configuración git
+    ├── main.py                   # 🚀 API FastAPI principal (endpoints)
+    ├── ml_predictor.py           # 🤖 Lógica de Machine Learning
+    ├── models.py                 # 📊 Modelos SQLAlchemy + Pydantic
+    ├── database.py               # 🗄️ Configuración de base de datos
+    ├── etl.py                    # 🔄 ETL para procesar datos
+    ├── requirements.txt          # 📦 Dependencias Python
+    ├── ventas.csv                # 📈 Datos originales de ventas
+    ├── facturas.csv              # 🧾 Datos originales de facturas  
+    ├── estados.csv               # 📋 Datos originales de estados
+    ├── modelo_hibrido.pkl        # 🤖 Modelo ML entrenado
+    ├── modelo_hibrido_metadata.pkl # 📊 Metadatos del modelo
+    ├── scaler_hibrido.pkl        # ⚖️ Scaler para normalización
+    ├── main_old.py               # 🗃️ Backup de versión anterior
+    ├── .git/                     # 🔧 Control de versiones
+    ├── .gitignore                # 🚫 Configuración git
     └── data/
-        ├── database.db           # Base de datos SQLite
-        └── json_completo.json    # Datos procesados
+        ├── database.db           # 🗃️ Base de datos SQLite
+        └── json_completo.json    # 📄 Datos procesados
 ```
 
 ## 🎯 Funcionalidades
 
-### 📊 **Endpoints de Datos Originales**
+### 📊 **Endpoints de Datos Mejorados**
 - `GET /` - Información general de la API
 - `GET /health` - Health check del sistema
-- `GET /resumen` - Resumen de registros en BD
-- `GET /comercializaciones` - Lista de comercializaciones
+- `GET /resumen` - Resumen con totales de registros
+- `GET /comercializaciones` - Lista de comercializaciones (con paginación)
 - `GET /cliente/{nombre}` - Comercializaciones por cliente
-- `GET /facturas` - Todas las facturas
-- `GET /estados` - Todos los estados
-- `GET /sence` - Estadísticas SENCE vs no-SENCE
+- `GET /facturas` - Todas las facturas (con paginación)
+- `GET /estados` - Todos los estados (con paginación)
+- `GET /sence` - Estadísticas SENCE vs no-SENCE con porcentajes
+- `GET /clientes` - Lista de todos los clientes únicos
 
 ### 🤖 **Endpoints de Machine Learning**
 - `POST /predecir` - Predicción individual de días de pago
@@ -120,7 +123,14 @@ curl -X POST "http://localhost:8000/predecir" \
 }
 ```
 
-## 📦 Base de Datos
+## 📦 Arquitectura del Sistema
+
+### **🏗️ Separación de Responsabilidades**
+- **`main.py`:** Endpoints y lógica de API
+- **`ml_predictor.py`:** Toda la lógica de Machine Learning
+- **`models.py`:** Modelos de datos (SQLAlchemy + Pydantic)
+- **`database.py`:** Configuración de base de datos
+- **`data/database.db`:** Fuente principal de datos (no CSV)
 
 ### **Tablas Principales**
 - **comercializaciones:** Datos de ventas

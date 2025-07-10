@@ -13,7 +13,6 @@ __pycache__/
 *.log
 *.sqlite3
 *.db
-*.pkl
 *.csv
 *.json
 
@@ -28,4 +27,4 @@ Thumbs.db
 .ipynb_checkpoints/
 
 # Streamlit cache
-.streamlit/
+.streamlit/modelo_hibrido.pkl
