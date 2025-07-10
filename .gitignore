@@ -16,6 +16,10 @@ __pycache__/
 *.csv
 *.json
 
+# Archivos grandes de modelo ML
+modelo_hibrido.pkl
+*.pkl
+
 # Config VSCode
 .vscode/
 
