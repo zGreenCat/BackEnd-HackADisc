@@ -64,3 +64,15 @@ def obtener_facturas(db: Session = Depends(get_db)):
 @app.get("/estados")
 def obtener_estados(db: Session = Depends(get_db)):
     return db.query(models.Estado).all()
+
+# Ruta GET /sence
+# Desc: Devuelve la cantidad de comercializaciones que corresponden a sence y las que no.
+@app.get("/sence")
+def contar_sence(db: Session = Depends(get_db)):
+    total_sence = db.query(models.Comercializacion).filter(models.Comercializacion.EsSENCE == 1).count()
+    total_no_sence = db.query(models.Comercializacion).filter(models.Comercializacion.EsSENCE == 0).count()
+
+    return {
+        "sence": total_sence,
+        "no_sence": total_no_sence
+    }
