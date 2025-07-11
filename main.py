@@ -16,6 +16,8 @@ from database import SessionLocal, engine
 import models
 from models import VentaInput, PrediccionResponse, EstadisticasMLResponse
 from ml_predictor import modelo_ml
+from statistics import mean, stdev
+from fastapi import Path
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -521,6 +523,113 @@ def probabilidad_pago_mes_actual(cliente_id: int, db: Session = Depends(get_db))
         },
         "fecha_consulta": hoy.isoformat()
     }
+
+# ===== ENDPOINTS ENTREGABLES =====
+
+#ΔX: 0 - 1 entre comerc.
+#ΔY: 1 comerc. - factura n1
+#ΔZ: factura n1 - factura n (state:3 = con pago)
+#ΔG: 0 comerc. - factura n (state:3 = con pago)
+def calcular_metricas(valores: List[int]):
+    if not valores:
+        return {"promedio_dias": None, "desviacion_estandar": None, "cantidad": 0}
+    return {
+        "promedio_dias": round(mean(valores), 2),
+        "desviacion_estandar": round(stdev(valores), 2) if len(valores) > 1 else 0,
+        "cantidad": len(valores)
+    }
+
+@app.get("/api/deltaX")
+@app.get("/api/deltaX/cliente/{cliente_id}")
+def delta_x(cliente_id: int = None, db: Session = Depends(get_db)):
+    """ΔX: Tiempo desde inicio hasta estado 'terminada' o 'terminada SENCE'"""
+    query = db.query(models.Estado, models.Comercializacion).join(models.Comercializacion, models.Estado.idComercializacion == models.Comercializacion.id)
+    if cliente_id:
+        query = query.filter(models.Comercializacion.ClienteId == cliente_id)
+    estados = query.filter(models.Estado.EstadoComercializacion.in_([1, 3])).all()
+
+    valores = []
+    for estado, com in estados:
+        if com.FechaInicio and estado.Fecha:
+            dias = (estado.Fecha - com.FechaInicio).days
+            if dias >= 0:
+                valores.append(dias)
+
+    return calcular_metricas(valores)
+
+@app.get("/api/deltaY")
+@app.get("/api/deltaY/cliente/{cliente_id}")
+def delta_y(cliente_id: int = None, db: Session = Depends(get_db)):
+    """ΔY: Desde que se terminó la comercialización hasta primera factura"""
+    comercializaciones = db.query(models.Comercializacion).filter(
+        models.Comercializacion.id.in_(
+            db.query(models.Estado.idComercializacion).filter(models.Estado.EstadoComercializacion.in_([1, 3]))
+        )
+    )
+    if cliente_id:
+        comercializaciones = comercializaciones.filter(models.Comercializacion.ClienteId == cliente_id)
+
+    valores = []
+    for com in comercializaciones:
+        estados_terminados = [e for e in com.estados if e.EstadoComercializacion in [1, 3]]
+        if not estados_terminados or not com.Facturas:
+            continue
+        estado_final = max(estados_terminados, key=lambda e: e.Fecha)
+        primera_factura = min(com.Facturas, key=lambda f: f.FechaFacturacion or datetime.max)
+
+        if estado_final.Fecha and primera_factura.FechaFacturacion:
+            dias = (primera_factura.FechaFacturacion - estado_final.Fecha).days
+            if dias >= 0:
+                valores.append(dias)
+
+    return calcular_metricas(valores)
+
+@app.get("/api/deltaZ")
+@app.get("/api/deltaZ/cliente/{cliente_id}")
+def delta_z(cliente_id: int = None, db: Session = Depends(get_db)):
+    """ΔZ: Desde primera factura hasta factura con pago"""
+    comercializaciones = db.query(models.Comercializacion)
+    if cliente_id:
+        comercializaciones = comercializaciones.filter(models.Comercializacion.ClienteId == cliente_id)
+
+    valores = []
+    for com in comercializaciones:
+        if not com.Facturas:
+            continue
+        facturas_ordenadas = sorted([f for f in com.Facturas if f.FechaFacturacion], key=lambda f: f.FechaFacturacion)
+        if not facturas_ordenadas:
+            continue
+        primera = facturas_ordenadas[0]
+        pagadas = [f for f in com.Facturas if f.EstadoFactura in [3, 4] and f.FechaFacturacion]
+
+        if pagadas:
+            fecha_pago = min(pagadas, key=lambda f: f.FechaFacturacion).FechaFacturacion
+            dias = (fecha_pago - primera.FechaFacturacion).days
+            if dias >= 0:
+                valores.append(dias)
+
+    return calcular_metricas(valores)
+
+@app.get("/api/deltaG")
+@app.get("/api/deltaG/cliente/{cliente_id}")
+def delta_g(cliente_id: int = None, db: Session = Depends(get_db)):
+    """ΔG: Desde inicio de comercialización hasta factura con pago"""
+    comercializaciones = db.query(models.Comercializacion)
+    if cliente_id:
+        comercializaciones = comercializaciones.filter(models.Comercializacion.ClienteId == cliente_id)
+
+    valores = []
+    for com in comercializaciones:
+        if not com.FechaInicio or not com.Facturas:
+            continue
+        pagadas = [f for f in com.Facturas if f.EstadoFactura in [3, 4] and f.FechaFacturacion]
+        if pagadas:
+            fecha_pago = min(pagadas, key=lambda f: f.FechaFacturacion).FechaFacturacion
+            dias = (fecha_pago - com.FechaInicio).days
+            if dias >= 0:
+                valores.append(dias)
+
+    return calcular_metricas(valores)
 
 if __name__ == "__main__":
     import uvicorn
