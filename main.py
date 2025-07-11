@@ -1712,7 +1712,7 @@ def predecir_dias_pago_cliente_resumen(cliente_id: int, db: Session = Depends(ge
         elif valor_promedio <= 500000:
             cantidad_facturas = 2
         else:
-                       cantidad_facturas = 3
+            cantidad_facturas = 3
         
         # Preparar datos mínimos para predicción
         datos_prediccion = {
@@ -1927,7 +1927,7 @@ def predecir_dias_pago_todos_clientes(
                     "dias_promedio_predicho": round(dias_promedio, 2),
                     "distribucion_riesgo": distribucion_riesgo,
                     "clientes_pagan_este_mes": pagan_este_mes,
-                    "porcentaje_pagan_este_mes": round((pagan_este_mes / len(predicciones_validas)) * 100, 2),
+                    "porcentaje_pagan_mes": round((pagan_este_mes / len(predicciones_validas)) * 100, 2),
                     "confianza_promedio": round(sum(p["prediccion"]["confianza"] for p in predicciones_validas) / len(predicciones_validas), 3)
                 }
             else:
@@ -2102,3 +2102,68 @@ def predecir_todos_clientes_resumen(
     except Exception as e:
         logger.error(f"Error en resumen de predicciones: {e}")
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+@app.get("/clientes/estadisticas")
+def obtener_clientes_con_estadisticas(db: Session = Depends(get_db)):
+    """
+    🔍 ENDPOINT: Clientes con Estadísticas de Ventas
+    
+    Devuelve todos los clientes únicos con sus estadísticas de ventas:
+    - Total de ventas (comercializaciones)
+    - Total de ventas SENCE
+    - Total de clientes
+    
+    Filtros aplicados: Excluye ADI, OTR, SPD
+    """
+    try:
+        logger.info("🔍 Iniciando consulta de clientes con estadísticas...")
+        
+        # Query principal: obtener todas las comercializaciones válidas agrupadas por cliente
+        query_result = db.query(
+            models.Comercializacion.ClienteId,
+            models.Comercializacion.Cliente,
+            func.count(models.Comercializacion.id).label("total_ventas"),
+            func.sum(models.Comercializacion.EsSENCE).label("total_sence")
+        ).filter(
+            # Filtros estándar de exclusión
+            ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+            ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+            ~models.Comercializacion.CodigoCotizacion.like('SPD%'),
+            # Solo clientes válidos
+            models.Comercializacion.Cliente.isnot(None),
+            models.Comercializacion.ClienteId.isnot(None)
+        ).group_by(
+            models.Comercializacion.ClienteId,
+            models.Comercializacion.Cliente
+        ).order_by(
+            models.Comercializacion.Cliente
+        ).all()
+        
+        logger.info(f"📊 Consulta completada: {len(query_result)} clientes encontrados")
+        
+        # Procesar resultados
+        clientes_estadisticas = []
+        
+        for resultado in query_result:
+            cliente_data = {
+                "IdCliente": resultado.ClienteId,
+                "NombreCliente": resultado.Cliente,
+                "total_ventas": resultado.total_ventas,
+                "total_sence": int(resultado.total_sence) if resultado.total_sence else 0
+            }
+            clientes_estadisticas.append(cliente_data)
+        
+        logger.info(f"✅ Procesamiento completado: {len(clientes_estadisticas)} clientes procesados")
+        
+        # Respuesta final
+        response_data = {
+            "clientes": clientes_estadisticas,
+            "total_clientes": len(clientes_estadisticas)
+        }
+        
+        logger.info(f"🎯 Endpoint exitoso: {response_data['total_clientes']} clientes devueltos")
+        return response_data
+        
+    except Exception as e:
+        logger.error(f"❌ Error en endpoint clientes/estadisticas: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
