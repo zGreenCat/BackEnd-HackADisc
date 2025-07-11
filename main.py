@@ -528,8 +528,8 @@ def probabilidad_pago_mes_actual(cliente_id: int, db: Session = Depends(get_db))
 
 #ΔX: 0 - 1 entre comerc.
 #ΔY: 1 comerc. - factura n1
-#ΔZ: factura n1 - factura n (state:3 = con pago)
-#ΔG: 0 comerc. - factura n (state:3 = con pago)
+#ΔZ: factura n1 - factura n (state:3/4 = con pago Y Pagado > 0)
+#ΔG: 0 comerc. - factura n (state:3/4 = con pago Y Pagado > 0)
 def calcular_metricas(valores: List[int]):
     if not valores:
         return {"promedio_dias": None, "desviacion_estandar": None, "cantidad": 0}
@@ -601,7 +601,7 @@ def delta_y(cliente_id: int = None, db: Session = Depends(get_db)):
 @app.get("/api/deltaZ")
 @app.get("/api/deltaZ/cliente/{cliente_id}")
 def delta_z(cliente_id: int = None, db: Session = Depends(get_db)):
-    """ΔZ: Desde la fecha de facturación de la primera factura hasta la fecha del último pago"""
+    """ΔZ: Desde la fecha de facturación de la primera factura hasta la fecha del último pago real (estado 3/4 y Pagado > 0)"""
     comercializaciones = db.query(models.Comercializacion)
     if cliente_id:
         comercializaciones = comercializaciones.filter(models.Comercializacion.ClienteId == cliente_id)
@@ -620,8 +620,11 @@ def delta_z(cliente_id: int = None, db: Session = Depends(get_db)):
         # Buscar la primera factura por fecha de facturación
         primera_factura = min(facturas, key=lambda f: f.FechaFacturacion)
         
-        # Buscar facturas con estado de pago (3 o 4 = pagadas)
-        facturas_pagadas = [f for f in facturas if f.EstadoFactura in [3, 4]]
+        # Buscar facturas con estado de pago (3 o 4 = pagadas) Y que tengan pago real (!=0)
+        facturas_pagadas = [f for f in facturas 
+                           if f.EstadoFactura in [3, 4] 
+                           and f.Pagado is not None 
+                           and f.Pagado > 0]
         
         if facturas_pagadas:
             # Tomar la fecha del último pago (factura pagada más reciente)
@@ -636,7 +639,7 @@ def delta_z(cliente_id: int = None, db: Session = Depends(get_db)):
 @app.get("/api/deltaG")
 @app.get("/api/deltaG/cliente/{cliente_id}")
 def delta_g(cliente_id: int = None, db: Session = Depends(get_db)):
-    """ΔG: Desde el estado de comercio 0 (inicio) hasta la fecha del último pago"""
+    """ΔG: Desde el estado de comercio 0 (inicio) hasta la fecha del último pago real (estado 3/4 y Pagado > 0)"""
     comercializaciones = db.query(models.Comercializacion)
     if cliente_id:
         comercializaciones = comercializaciones.filter(models.Comercializacion.ClienteId == cliente_id)
@@ -647,11 +650,13 @@ def delta_g(cliente_id: int = None, db: Session = Depends(get_db)):
         if not com.FechaInicio:
             continue
         
-        # Buscar facturas de esta comercialización con estado de pago (3 o 4 = pagadas)
+        # Buscar facturas de esta comercialización con estado de pago (3 o 4 = pagadas) Y que tengan pago real (!=0)
         facturas_pagadas = db.query(models.Factura).filter(
             models.Factura.idComercializacion == com.id,
             models.Factura.EstadoFactura.in_([3, 4]),
-            models.Factura.FechaFacturacion.isnot(None)
+            models.Factura.FechaFacturacion.isnot(None),
+            models.Factura.Pagado.isnot(None),
+            models.Factura.Pagado > 0
         ).all()
         
         if facturas_pagadas:
