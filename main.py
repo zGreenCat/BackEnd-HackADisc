@@ -1525,7 +1525,7 @@ def debug_abril_2025_como_companero(db: Session = Depends(get_db)):
         # 2. Excluir códigos ADI, OTR, SPD
         # 3. Estado más reciente = 1
         # 4. Factura con estado 3 y pagado > 0
-        # 5. Suma de pagos >= valor venta
+        # 5. Suma de pagos >= valor de la comercialización
         
         comercializaciones_abril = db.query(models.Comercializacion).filter(
             func.extract('year', models.Comercializacion.FechaInicio) == 2025,
@@ -1598,6 +1598,200 @@ def debug_abril_2025_como_companero(db: Session = Depends(get_db)):
         logger.error(f"Error replicando lógica del compañero: {e}")
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
         
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+# ===== ENDPOINT SIMPLIFICADO DE PREDICCIÓN POR ID CLIENTE =====
+
+@app.get("/predecir_cliente/{cliente_id}")
+def predecir_dias_pago_cliente(cliente_id: int, db: Session = Depends(get_db)):
+    """
+    Predice los días de pago para un cliente usando solo su ID.
+    Utiliza datos históricos del cliente para generar predicción automática.
+    
+    Args:
+        cliente_id: ID del cliente en la base de datos
+    
+    Returns:
+        Predicción de días de pago con información del cliente
+    """
+    if not modelo_ml.esta_disponible():
+        raise HTTPException(status_code=503, detail="Modelo de ML no disponible")
+    
+    try:
+        # 1. OBTENER INFORMACIÓN DEL CLIENTE
+        cliente_info = db.query(models.Comercializacion).filter(
+            models.Comercializacion.ClienteId == cliente_id,
+            models.Comercializacion.Cliente.isnot(None),
+            ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+            ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+            ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+        ).first()
+        
+        if not cliente_info:
+            raise HTTPException(status_code=404, detail=f"Cliente con ID {cliente_id} no encontrado")
+        
+        # 2. CALCULAR ESTADÍSTICAS HISTÓRICAS DEL CLIENTE
+        comercializaciones_cliente = db.query(models.Comercializacion).filter(
+            models.Comercializacion.ClienteId == cliente_id,
+            models.Comercializacion.ValorVenta.isnot(None),
+            ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+            ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+            ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+        ).all()
+        
+        if not comercializaciones_cliente:
+            raise HTTPException(status_code=404, detail=f"No se encontraron comercializaciones válidas para el cliente {cliente_id}")
+        
+        # Calcular valor promedio
+        valores_venta = [c.ValorVenta for c in comercializaciones_cliente if c.ValorVenta and c.ValorVenta > 0]
+        valor_promedio = sum(valores_venta) / len(valores_venta) if valores_venta else 500000
+        
+        # Determinar si es cliente SENCE (mayoría de sus comercializaciones)
+        total_comercializaciones = len(comercializaciones_cliente)
+        comercializaciones_sence = sum(1 for c in comercializaciones_cliente if c.EsSENCE)
+        es_cliente_sence = comercializaciones_sence > (total_comercializaciones / 2)
+        
+        # Determinar correo basado en tipo de cliente
+        correo_frecuente = "sence@insecap.cl" if es_cliente_sence else "comercial@insecap.cl"
+        
+        # Calcular número promedio de facturas
+        facturas_por_comercializacion = []
+        for c in comercializaciones_cliente:
+            facturas_count = db.query(models.Factura).filter(
+                models.Factura.idComercializacion == c.id
+            ).count()
+            facturas_por_comercializacion.append(facturas_count)
+        
+        cantidad_facturas_promedio = int(sum(facturas_por_comercializacion) / len(facturas_por_comercializacion)) if facturas_por_comercializacion else 1
+        cantidad_facturas_promedio = max(1, min(cantidad_facturas_promedio, 5))  # Entre 1 y 5
+        
+        # 3. PREPARAR DATOS PARA PREDICCIÓN
+        mes_actual = datetime.now().month
+        datos_prediccion = {
+            "cliente": cliente_info.Cliente,
+            "correo_creador": correo_frecuente,
+            "valor_venta": valor_promedio,
+            "es_sence": es_cliente_sence,
+            "mes_facturacion": mes_actual,
+            "cantidad_facturas": cantidad_facturas_promedio
+        }
+        
+        # 4. REALIZAR PREDICCIÓN
+        resultado_prediccion = modelo_ml.predecir_dias_pago(datos_prediccion)
+        
+        # 5. ENRIQUECER RESPUESTA CON INFORMACIÓN DEL CLIENTE
+        respuesta_completa = {
+            "cliente_id": cliente_id,
+            "cliente_nombre": cliente_info.Cliente,
+            "prediccion": {
+                "dias_predichos": resultado_prediccion["dias_predichos"],
+                "nivel_riesgo": resultado_prediccion["nivel_riesgo"],
+                "codigo_riesgo": resultado_prediccion["codigo_riesgo"],
+                "descripcion_riesgo": resultado_prediccion["descripcion_riesgo"],
+                "accion_recomendada": resultado_prediccion["accion_recomendada"],
+                "confianza": resultado_prediccion["confianza"],
+                "se_paga_mismo_mes": resultado_prediccion["se_paga_mismo_mes"],
+                "explicacion_mes": resultado_prediccion["explicacion_mes"]
+            },
+            "datos_utilizados": {
+                "valor_venta_promedio": round(valor_promedio, 2),
+                "es_cliente_sence": es_cliente_sence,
+                "cantidad_facturas_promedio": cantidad_facturas_promedio,
+                "mes_prediccion": mes_actual,
+                "correo_asignado": correo_frecuente
+            },
+            "estadisticas_cliente": {
+                "total_comercializaciones": total_comercializaciones,
+                "comercializaciones_sence": comercializaciones_sence,
+                "porcentaje_sence": round((comercializaciones_sence / total_comercializaciones) * 100, 2),
+                "valor_minimo": min(valores_venta) if valores_venta else 0,
+                "valor_maximo": max(valores_venta) if valores_venta else 0,
+                "valor_promedio": round(valor_promedio, 2)
+            },
+            "fecha_prediccion": datetime.now().isoformat(),
+            "modelo_version": resultado_prediccion.get("modelo_version", "Híbrido v2.0")
+        }
+        
+        return respuesta_completa
+        
+    except HTTPException:
+        raise  # Re-lanzar HTTPExceptions
+    except Exception as e:
+        logger.error(f"Error en predicción por cliente ID {cliente_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+@app.get("/predecir_cliente/{cliente_id}/resumen")
+def predecir_dias_pago_cliente_resumen(cliente_id: int, db: Session = Depends(get_db)):
+    """
+    Versión resumida de predicción por ID de cliente (solo lo esencial).
+    
+    Args:
+        cliente_id: ID del cliente en la base de datos
+    
+    Returns:
+        Predicción resumida con información básica
+    """
+    if not modelo_ml.esta_disponible():
+        raise HTTPException(status_code=503, detail="Modelo de ML no disponible")
+    
+    try:
+        # Obtener información básica del cliente
+        cliente_info = db.query(models.Comercializacion).filter(
+            models.Comercializacion.ClienteId == cliente_id,
+            models.Comercializacion.Cliente.isnot(None),
+            ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+            ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+            ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+        ).first()
+        
+        if not cliente_info:
+            raise HTTPException(status_code=404, detail=f"Cliente con ID {cliente_id} no encontrado")
+        
+        # Obtener comercializaciones para calcular promedio
+        comercializaciones = db.query(models.Comercializacion.ValorVenta, models.Comercializacion.EsSENCE).filter(
+            models.Comercializacion.ClienteId == cliente_id,
+            models.Comercializacion.ValorVenta.isnot(None),
+            ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+            ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+            ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+        ).all()
+        
+        if not comercializaciones:
+            raise HTTPException(status_code=404, detail="No hay datos suficientes para predicción")
+        
+        # Calcular datos básicos
+        valores = [c[0] for c in comercializaciones if c[0] and c[0] > 0]
+        valor_promedio = sum(valores) / len(valores) if valores else 500000
+        
+        sence_count = sum(1 for c in comercializaciones if c[1])
+        es_sence = sence_count > (len(comercializaciones) / 2)
+        
+        # Preparar datos mínimos para predicción
+        datos_prediccion = {
+            "cliente": cliente_info.Cliente,
+            "correo_creador": "prediccion@insecap.cl",
+            "valor_venta": valor_promedio,
+            "es_sence": es_sence,
+            "mes_facturacion": datetime.now().month,
+            "cantidad_facturas": 2  # Valor estándar
+        }
+        
+        # Realizar predicción
+        resultado = modelo_ml.predecir_dias_pago(datos_prediccion)
+        
+        # Respuesta simplificada
+        return {
+            "cliente_id": cliente_id,
+            "cliente": cliente_info.Cliente,
+            "dias_predichos": resultado["dias_predichos"],
+            "nivel_riesgo": resultado["codigo_riesgo"],
+            "se_paga_este_mes": resultado["se_paga_mismo_mes"],
+            "confianza": round(resultado["confianza"], 3),
+            "tipo_cliente": "SENCE" if es_sence else "COMERCIAL",
+            "valor_promedio": round(valor_promedio, 2),
+            "fecha_prediccion": datetime.now().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error en predicción resumida cliente {cliente_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
