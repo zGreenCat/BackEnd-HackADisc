@@ -11,14 +11,19 @@ __pycache__/
 
 # Archivos de logs o temporales
 *.log
-*.sqlite3
-*.db
-*.csv
-*.json
 
-# Archivos grandes de modelo ML
+# Archivos específicos a ignorar (no los datos del proyecto)
+temp.csv
+backup.json
+test.db
+
+# Archivos muy grandes (opcional - descomentar si causan problemas)
+json_completo.json
 modelo_hibrido.pkl
-*.pkl
+
+# Pero mantener los metadatos y scaler (son pequeños)
+!modelo_hibrido_metadata.pkl
+!scaler_hibrido.pkl
 
 # Config VSCode
 .vscode/
