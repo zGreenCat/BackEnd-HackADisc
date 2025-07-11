@@ -73,16 +73,8 @@ class ModeloPrediccionML:
                 else:
                     raise FileNotFoundError("No se encontraron archivos de modelo")
             
-            # Umbrales diferenciados por tipo de proyecto (SENCE vs NO SENCE)
-            self.umbrales_sence = {
-                'muy_bajo': 37.0, 'bajo': 55.0, 'medio': 82.0, 
-                'alto': 126.0, 'critico': 150.0, 'media': 65.0, 'mediana': 55.0
-            }
-            
-            self.umbrales_no_sence = {
-                'muy_bajo': 22.0, 'bajo': 35.0, 'medio': 47.0, 
-                'alto': 62.0, 'critico': 80.0, 'media': 35.9, 'mediana': 35.0
-            }
+            # Calcular umbrales dinámicamente basados en datos reales
+            self._calcular_umbrales_dinamicos()
             
             # Umbrales generales (para compatibilidad)
             self.umbrales_inteligentes = self.umbrales_no_sence
@@ -423,6 +415,114 @@ class ModeloPrediccionML:
             "codigo_riesgo": codigo_riesgo,
             "accion_recomendada": accion
         }
+    
+    def _calcular_umbrales_dinamicos(self):
+        """Calcula umbrales dinámicos basados en percentiles de datos reales"""
+        try:
+            import sqlite3
+            import numpy as np
+            
+            # Conectar a la base de datos
+            db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'database.db')
+            
+            if not os.path.exists(db_path):
+                logger.warning(f"⚠️ Base de datos no encontrada en {db_path}, usando umbrales por defecto")
+                self._usar_umbrales_por_defecto()
+                return
+            
+            conn = sqlite3.connect(db_path)
+            
+            # Query para obtener datos de días de pago por tipo de cliente
+            query = """
+            SELECT mt.DeltaG, c.EsSENCE
+            FROM metricas_tiempo mt
+            JOIN comercializaciones c ON mt.idCliente = c.ClienteId
+            WHERE mt.DeltaG IS NOT NULL 
+            AND mt.DeltaG > 0 
+            AND mt.DeltaG < 365
+            AND c.CodigoCotizacion NOT LIKE 'ADI%'
+            AND c.CodigoCotizacion NOT LIKE 'OTR%' 
+            AND c.CodigoCotizacion NOT LIKE 'SPD%'
+            """
+            
+            cursor = conn.cursor()
+            cursor.execute(query)
+            resultados = cursor.fetchall()
+            conn.close()
+            
+            if not resultados:
+                logger.warning("⚠️ No se encontraron datos para calcular umbrales, usando valores por defecto")
+                self._usar_umbrales_por_defecto()
+                return
+            
+            # Separar datos por tipo de cliente
+            dias_comercial = [r[0] for r in resultados if r[1] == 0]  # EsSENCE = 0
+            dias_sence = [r[0] for r in resultados if r[1] == 1]      # EsSENCE = 1
+            
+            if not dias_comercial or not dias_sence:
+                logger.warning("⚠️ Datos insuficientes para algún tipo de cliente, usando valores por defecto")
+                self._usar_umbrales_por_defecto()
+                return
+            
+            # Calcular percentiles para CLIENTES COMERCIALES
+            comercial_p25 = np.percentile(dias_comercial, 25)
+            comercial_p50 = np.percentile(dias_comercial, 50)
+            comercial_p75 = np.percentile(dias_comercial, 75)
+            comercial_p90 = np.percentile(dias_comercial, 90)
+            comercial_mean = np.mean(dias_comercial)
+            
+            # Calcular percentiles para CLIENTES SENCE
+            sence_p25 = np.percentile(dias_sence, 25)
+            sence_p50 = np.percentile(dias_sence, 50)
+            sence_p75 = np.percentile(dias_sence, 75)
+            sence_p90 = np.percentile(dias_sence, 90)
+            sence_mean = np.mean(dias_sence)
+            
+            # Configurar umbrales basados en percentiles reales
+            self.umbrales_no_sence = {
+                'muy_bajo': round(comercial_p25, 1),      # 25° percentil
+                'bajo': round(comercial_p50, 1),          # 50° percentil (mediana)
+                'medio': round(comercial_p75, 1),         # 75° percentil
+                'alto': round(comercial_p90, 1),          # 90° percentil
+                'critico': round(comercial_p90 * 1.3, 1), # 30% más que p90
+                'media': round(comercial_mean, 1),
+                'mediana': round(comercial_p50, 1)
+            }
+            
+            self.umbrales_sence = {
+                'muy_bajo': round(sence_p25, 1),          # 25° percentil
+                'bajo': round(sence_p50, 1),              # 50° percentil (mediana)
+                'medio': round(sence_p75, 1),             # 75° percentil
+                'alto': round(sence_p90, 1),              # 90° percentil
+                'critico': round(sence_p90 * 1.3, 1),     # 30% más que p90
+                'media': round(sence_mean, 1),
+                'mediana': round(sence_p50, 1)
+            }
+            
+            logger.info("✅ Umbrales calculados dinámicamente:")
+            logger.info(f"   📊 COMERCIAL: Media={comercial_mean:.1f}d, P25={comercial_p25:.1f}d, P50={comercial_p50:.1f}d, P75={comercial_p75:.1f}d, P90={comercial_p90:.1f}d")
+            logger.info(f"   📊 SENCE: Media={sence_mean:.1f}d, P25={sence_p25:.1f}d, P50={sence_p50:.1f}d, P75={sence_p75:.1f}d, P90={sence_p90:.1f}d")
+            logger.info(f"   🎯 Umbrales COMERCIAL: Muy Bajo≤{self.umbrales_no_sence['muy_bajo']}, Bajo≤{self.umbrales_no_sence['bajo']}, Medio≤{self.umbrales_no_sence['medio']}, Alto≤{self.umbrales_no_sence['alto']}, Crítico>{self.umbrales_no_sence['alto']}")
+            logger.info(f"   🎯 Umbrales SENCE: Muy Bajo≤{self.umbrales_sence['muy_bajo']}, Bajo≤{self.umbrales_sence['bajo']}, Medio≤{self.umbrales_sence['medio']}, Alto≤{self.umbrales_sence['alto']}, Crítico>{self.umbrales_sence['alto']}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error calculando umbrales dinámicos: {e}")
+            self._usar_umbrales_por_defecto()
+    
+    def _usar_umbrales_por_defecto(self):
+        """Establece umbrales por defecto en caso de error en cálculo dinámico"""
+        # Umbrales basados en análisis previo (como fallback)
+        self.umbrales_no_sence = {
+            'muy_bajo': 22.0, 'bajo': 35.0, 'medio': 47.0, 
+            'alto': 62.0, 'critico': 80.0, 'media': 35.9, 'mediana': 35.0
+        }
+        
+        self.umbrales_sence = {
+            'muy_bajo': 37.0, 'bajo': 55.0, 'medio': 82.0, 
+            'alto': 126.0, 'critico': 150.0, 'media': 65.0, 'mediana': 55.0
+        }
+        
+        logger.info("📋 Usando umbrales por defecto (fallback)")
     
     def _obtener_deltas_cliente(self, cliente_nombre: str) -> dict:
         """Obtiene los deltas temporales promedio para un cliente específico"""

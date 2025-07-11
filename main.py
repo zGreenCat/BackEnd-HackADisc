@@ -1764,6 +1764,15 @@ def predecir_dias_pago_cliente_resumen(cliente_id: int, db: Session = Depends(ge
         sence_count = sum(1 for c in comercializaciones if c[1])
         es_sence = sence_count > (len(comercializaciones) / 2)
         
+        # Calcular cantidad de facturas promedio realista
+        # Para valores pequeños, usar 1 factura (más común)
+        if valor_promedio <= 200000:
+            cantidad_facturas = 1
+        elif valor_promedio <= 500000:
+            cantidad_facturas = 2
+        else:
+            cantidad_facturas = 3
+        
         # Preparar datos mínimos para predicción
         datos_prediccion = {
             "cliente": cliente_info.Cliente,
@@ -1771,7 +1780,7 @@ def predecir_dias_pago_cliente_resumen(cliente_id: int, db: Session = Depends(ge
             "valor_venta": valor_promedio,
             "es_sence": es_sence,
             "mes_facturacion": datetime.now().month,
-            "cantidad_facturas": 2  # Valor estándar
+            "cantidad_facturas": cantidad_facturas
         }
         
         # Realizar predicción
