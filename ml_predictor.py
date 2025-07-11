@@ -39,11 +39,19 @@ class ModeloPrediccionML:
                 self.scaler_hibrido = joblib.load(scaler_path)
                 self.metadata_hibrido = joblib.load(metadata_path)
                 
-                # Calcular umbrales inteligentes basados en datos históricos reales
-                self.umbrales_inteligentes = {
-                    'muy_bajo': 28.0, 'bajo': 36.0, 'medio': 47.0, 
-                    'alto': 63.0, 'critico': 77.0, 'media': 38.2, 'mediana': 36.0
+                # Umbrales diferenciados por tipo de proyecto (SENCE vs NO SENCE)
+                self.umbrales_sence = {
+                    'muy_bajo': 37.0, 'bajo': 55.0, 'medio': 82.0, 
+                    'alto': 126.0, 'critico': 150.0, 'media': 65.0, 'mediana': 55.0
                 }
+                
+                self.umbrales_no_sence = {
+                    'muy_bajo': 22.0, 'bajo': 35.0, 'medio': 47.0, 
+                    'alto': 62.0, 'critico': 80.0, 'media': 35.9, 'mediana': 35.0
+                }
+                
+                # Umbrales generales (para compatibilidad)
+                self.umbrales_inteligentes = self.umbrales_no_sence
                 
                 self.modelo_cargado = True
                 logger.info("✅ Modelos de ML cargados exitosamente")
@@ -75,7 +83,8 @@ class ModeloPrediccionML:
                 "fecha_entrenamiento": self.metadata_hibrido.get('fecha_entrenamiento', 'No disponible')
             },
             "features_principales": self.metadata_hibrido['features'][:10],
-            "umbrales_riesgo": self.umbrales_inteligentes,
+            "umbrales_comercial": self.umbrales_no_sence,
+            "umbrales_sence": self.umbrales_sence,
             "rendimiento": {
                 "precision": "Excelente (MAE < 3 días)",
                 "r2_score": f"{self.metadata_hibrido['r2']:.4f}",
@@ -83,9 +92,14 @@ class ModeloPrediccionML:
             }
         }
     
-    def clasificar_riesgo_inteligente(self, dias_predichos: int) -> Tuple[str, str, str, str]:
-        """Clasifica el riesgo basado en umbrales inteligentes"""
-        if not self.umbrales_inteligentes:
+    def clasificar_riesgo_inteligente(self, dias_predichos: int, es_sence: bool = False) -> Tuple[str, str, str, str]:
+        """Clasifica el riesgo basado en umbrales diferenciados por tipo de proyecto"""
+        
+        # Seleccionar umbrales según tipo de proyecto
+        umbrales = self.umbrales_sence if es_sence else self.umbrales_no_sence
+        tipo_proyecto = "SENCE" if es_sence else "Comercial"
+        
+        if not umbrales:
             # Fallback a clasificación simple
             if dias_predichos <= 30:
                 return "🟢 BAJO", "BAJO", "Bueno: Dentro del rango esperado", "Seguimiento normal"
@@ -94,35 +108,35 @@ class ModeloPrediccionML:
             else:
                 return "🔴 ALTO", "ALTO", "Preocupante: Requiere intervención", "Intervención urgente requerida"
         
-        # Clasificación inteligente
-        if dias_predichos <= self.umbrales_inteligentes['muy_bajo']:
+        # Clasificación inteligente diferenciada
+        if dias_predichos <= umbrales['muy_bajo']:
             return (
                 "🟢 MUY BAJO", "MUY_BAJO",
-                f"Excelente: Mejor que 75% de casos históricos (≤{self.umbrales_inteligentes['muy_bajo']:.0f} días)",
+                f"Excelente para {tipo_proyecto}: Mejor que 75% de casos similares (≤{umbrales['muy_bajo']:.0f} días)",
                 "Seguimiento automático mensual"
             )
-        elif dias_predichos <= self.umbrales_inteligentes['bajo']:
+        elif dias_predichos <= umbrales['bajo']:
             return (
                 "🟢 BAJO", "BAJO",
-                f"Bueno: Mejor que 50% de casos históricos (≤{self.umbrales_inteligentes['bajo']:.0f} días)",
+                f"Bueno para {tipo_proyecto}: Mejor que 50% de casos similares (≤{umbrales['bajo']:.0f} días)",
                 "Seguimiento quincenal estándar"
             )
-        elif dias_predichos <= self.umbrales_inteligentes['medio']:
+        elif dias_predichos <= umbrales['medio']:
             return (
                 "🟡 MEDIO", "MEDIO",
-                f"Normal: Entre mediana y percentil 75 ({self.umbrales_inteligentes['bajo']:.0f}-{self.umbrales_inteligentes['medio']:.0f} días)",
+                f"Normal para {tipo_proyecto}: Entre mediana y percentil 75 ({umbrales['bajo']:.0f}-{umbrales['medio']:.0f} días)",
                 "Contacto proactivo semanal"
             )
-        elif dias_predichos <= self.umbrales_inteligentes['alto']:
+        elif dias_predichos <= umbrales['alto']:
             return (
                 "🟠 ALTO", "ALTO",
-                f"Preocupante: Peor que 75% de casos ({self.umbrales_inteligentes['medio']:.0f}-{self.umbrales_inteligentes['alto']:.0f} días)",
+                f"Preocupante para {tipo_proyecto}: Peor que 75% de casos similares ({umbrales['medio']:.0f}-{umbrales['alto']:.0f} días)",
                 "Seguimiento diario y escalamiento"
             )
         else:
             return (
                 "🔴 CRÍTICO", "CRITICO",
-                f"Alarmante: Peor que 90% de casos históricos (>{self.umbrales_inteligentes['alto']:.0f} días)",
+                f"Alarmante para {tipo_proyecto}: Peor que 90% de casos similares (>{umbrales['alto']:.0f} días)",
                 "Intervención inmediata y revisión gerencial"
             )
     
@@ -217,8 +231,9 @@ class ModeloPrediccionML:
             prediccion = self.modelo_hibrido.predict(nueva_venta[self.metadata_hibrido['features']])[0]
             dias_predichos = max(0, round(prediccion))
             
-            # Clasificar riesgo
-            nivel_riesgo, codigo_riesgo, descripcion_riesgo, accion = self.clasificar_riesgo_inteligente(dias_predichos)
+            # Clasificar riesgo usando umbrales diferenciados
+            es_sence = bool(datos_venta.get('es_sence', False))
+            nivel_riesgo, codigo_riesgo, descripcion_riesgo, accion = self.clasificar_riesgo_inteligente(dias_predichos, es_sence)
             
             # Análisis de temporalidad
             se_paga_mismo_mes, explicacion_mes = self.analizar_temporalidad(
@@ -277,7 +292,9 @@ class ModeloPrediccionML:
         prediccion = self.modelo_hibrido.predict(nueva_venta[self.metadata_hibrido['features']])[0]
         dias_predichos = max(0, round(prediccion))
         
-        nivel_riesgo, codigo_riesgo, descripcion_riesgo, accion = self.clasificar_riesgo_inteligente(dias_predichos)
+        # Clasificar riesgo usando umbrales diferenciados
+        es_sence = bool(datos_venta.get('es_sence', False))
+        nivel_riesgo, codigo_riesgo, descripcion_riesgo, accion = self.clasificar_riesgo_inteligente(dias_predichos, es_sence)
         
         return {
             "dias_predichos": dias_predichos,
