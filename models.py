@@ -43,6 +43,17 @@ class Factura(Base):
     Usuario = Column(String)
     Observacion = Column(String)
 
+class MetricasTiempo(Base):
+    __tablename__ = "metricas_tiempo"
+
+    idMetricasTiempo = Column(Integer, primary_key=True, index=True)
+    idCliente = Column(Integer, nullable=True)
+    Cliente = Column(String, nullable=False)
+    DeltaX = Column(Float, nullable=True)
+    DeltaY = Column(Float, nullable=True)
+    DeltaZ = Column(Float, nullable=True)
+    DeltaG = Column(Float, nullable=True)
+    Date = Column(Date, nullable=False)
 
 # Nueva tabla para predicciones almacenadas
 class PrediccionAlmacenada(Base):
