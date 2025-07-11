@@ -53,7 +53,6 @@ class MetricasTiempo(Base):
     DeltaY = Column(Float, nullable=True)
     DeltaZ = Column(Float, nullable=True)
     DeltaG = Column(Float, nullable=True)
-    Date = Column(Date, nullable=False)
 
 # Nueva tabla para predicciones almacenadas
 class PrediccionAlmacenada(Base):
