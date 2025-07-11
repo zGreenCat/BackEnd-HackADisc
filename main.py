@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 import logging
 import numpy as np
-
+import calendar
 # Imports locales
 from database import SessionLocal, engine
 import models
@@ -114,7 +114,7 @@ def resumen(db: Session = Depends(get_db)):
         "total_general": total_ventas + total_facturas + total_estados
     }
 
-@app.get("/comercializaciones")
+@app.get("/")
 def obtener_comercializaciones(limit: int = 100, offset: int = 0, db: Session = Depends(get_db)):
     """Devuelve comercializaciones con paginación"""
     comercializaciones = db.query(models.Comercializacion).offset(offset).limit(limit).all()
@@ -432,6 +432,95 @@ def predecir_ingresos_resumen(ano: int, mes: int, db: Session = Depends(get_db))
     except Exception as e:
         logger.error(f"Error en predicción de ingresos resumen: {e}")
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+@app.get("/cliente/{cliente_id}/probabilidad_pago_mes_actual")
+def probabilidad_pago_mes_actual(cliente_id: int, db: Session = Depends(get_db)):
+    """
+    Predice la probabilidad de que un cliente pague dentro del mes actual,
+    separando entre ventas SENCE y no SENCE.
+    """
+    if not modelo_ml.esta_disponible():
+        raise HTTPException(status_code=503, detail="Modelo de ML no disponible")
+
+    hoy = datetime.now()
+    dias_restantes = (calendar.monthrange(hoy.year, hoy.month)[1] - hoy.day)
+
+    # Obtener ventas activas del cliente
+    ventas = (
+        db.query(models.Comercializacion)
+        .filter(models.Comercializacion.ClienteId == cliente_id)
+        .filter(models.Comercializacion.EstadoComercializacion.in_([0, 1, 3]))  # En proceso, terminado, SENCE
+        .all()
+    )
+
+    if not ventas:
+        raise HTTPException(status_code=404, detail="No se encontraron ventas activas para el cliente")
+
+    resultados_sence = []
+    resultados_no_sence = []
+
+    for venta in ventas:
+        datos_venta = {
+            "cliente": venta.Cliente,
+            "correo_creador": venta.CorreoCreador,
+            "valor_venta": venta.ValorFinalComercializacion,
+            "es_sence": bool(venta.EsSENCE),
+            "mes_facturacion": hoy.month,
+            "cantidad_facturas": len(venta.Facturas or [])
+        }
+
+        try:
+            prediccion = modelo_ml.predecir_dias_pago(datos_venta)
+            dias = prediccion.get("dias_predichos", 99)
+            pago_este_mes = dias <= dias_restantes
+
+            resultado = {
+                "idComercializacion": venta.id,
+                "dias_predichos": dias,
+                "pago_este_mes": pago_este_mes
+            }
+
+            if datos_venta["es_sence"]:
+                resultados_sence.append(resultado)
+            else:
+                resultados_no_sence.append(resultado)
+
+        except Exception as e:
+            resultado = {
+                "idComercializacion": venta.id,
+                "error": str(e)
+            }
+            if datos_venta["es_sence"]:
+                resultados_sence.append(resultado)
+            else:
+                resultados_no_sence.append(resultado)
+
+    # Calcular probabilidades
+    def calcular_probabilidad(resultados):
+        válidos = [r for r in resultados if "pago_este_mes" in r]
+        if not válidos:
+            return 0.0
+        positivos = sum(1 for r in válidos if r["pago_este_mes"])
+        return round(positivos / len(válidos), 2)
+
+    return {
+        "cliente_id": cliente_id,
+        "cliente": ventas[0].Cliente,
+        "mes_actual": hoy.strftime("%B"),
+        "probabilidades": {
+            "SENCE": {
+                "probabilidad_pago_mes": calcular_probabilidad(resultados_sence),
+                "ventas_analizadas": len(resultados_sence),
+                "detalles": resultados_sence
+            },
+            "No SENCE": {
+                "probabilidad_pago_mes": calcular_probabilidad(resultados_no_sence),
+                "ventas_analizadas": len(resultados_no_sence),
+                "detalles": resultados_no_sence
+            }
+        },
+        "fecha_consulta": hoy.isoformat()
+    }
 
 if __name__ == "__main__":
     import uvicorn
