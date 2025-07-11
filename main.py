@@ -1305,8 +1305,8 @@ def calcular_proyeccion_anual_simplificada(
                 "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
             ][mes - 1]
             
-            # 1. DATOS REALES DEL MES
-            # Comercializaciones del mes (filtradas y pagadas completamente)
+            # 1. DATOS REALES DEL MES - LÓGICA CORREGIDA
+            # SOLO comercializaciones con FechaInicio en el mes que estén completamente pagadas
             comercializaciones_mes_base = db.query(models.Comercializacion).filter(
                 func.extract('year', models.Comercializacion.FechaInicio) == ano,
                 func.extract('month', models.Comercializacion.FechaInicio) == mes,
@@ -1316,36 +1316,28 @@ def calcular_proyeccion_anual_simplificada(
                 ~models.Comercializacion.CodigoCotizacion.like('SPD%')
             ).all()
             
-            # Filtrar solo comercializaciones completamente pagadas
+            # Procesar solo comercializaciones completamente pagadas
             valor_ventas_real = 0
+            valor_cobrado_real = 0  # Suma de todos los pagos de las comercializaciones del mes
             cantidad_ventas_real = 0
+            cantidad_pagos_real = 0
+            
             for com in comercializaciones_mes_base:
                 if validar_cliente_pagado_completo(com.id, db):
+                    # Agregar valor de venta
                     valor_ventas_real += com.ValorVenta or 0
                     cantidad_ventas_real += 1
-            
-            # Pagos recibidos en el mes (de comercializaciones filtradas y completamente pagadas)
-            facturas_pagadas_mes_base = db.query(models.Factura).join(
-                models.Comercializacion, 
-                models.Factura.idComercializacion == models.Comercializacion.id
-            ).filter(
-                func.extract('year', models.Factura.FechaFacturacion) == ano,
-                func.extract('month', models.Factura.FechaFacturacion) == mes,
-                models.Factura.EstadoFactura.in_([3, 4]),
-                models.Factura.Pagado.isnot(None),
-                models.Factura.Pagado > 0,
-                ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
-                ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
-                ~models.Comercializacion.CodigoCotizacion.like('SPD%')
-            ).all()
-            
-            # Filtrar solo pagos de comercializaciones completamente pagadas
-            valor_cobrado_real = 0
-            cantidad_pagos_real = 0
-            for factura in facturas_pagadas_mes_base:
-                if validar_cliente_pagado_completo(factura.idComercializacion, db):
-                    valor_cobrado_real += factura.Pagado or 0
-                    cantidad_pagos_real += 1
+                    
+                    # Agregar TODOS los pagos de esta comercialización (independiente de cuándo se pagaron)
+                    facturas_com = db.query(models.Factura).filter(
+                        models.Factura.idComercializacion == com.id,
+                        models.Factura.Pagado.isnot(None),
+                        models.Factura.Pagado > 0
+                    ).all()
+                    
+                    for factura in facturas_com:
+                        valor_cobrado_real += factura.Pagado or 0
+                        cantidad_pagos_real += 1
             
             # Valor total real del mes (ventas + cobros)
             valor_real_mes = valor_ventas_real + valor_cobrado_real
@@ -1522,6 +1514,90 @@ def calcular_proyeccion_anual_simplificada(
         logger.error(f"Error en proyección anual simplificada: {e}")
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
+@app.get("/debug/abril_2025_como_companero")
+def debug_abril_2025_como_companero(db: Session = Depends(get_db)):
+    """
+    Replica EXACTAMENTE la lógica del compañero para abril 2025
+    """
+    try:
+        # LÓGICA EXACTA DEL COMPAÑERO:
+        # 1. FechaInicio en abril 2025 (NO fecha de facturación)
+        # 2. Excluir códigos ADI, OTR, SPD
+        # 3. Estado más reciente = 1
+        # 4. Factura con estado 3 y pagado > 0
+        # 5. Suma de pagos >= valor venta
+        
+        comercializaciones_abril = db.query(models.Comercializacion).filter(
+            func.extract('year', models.Comercializacion.FechaInicio) == 2025,
+            func.extract('month', models.Comercializacion.FechaInicio) == 4,
+            ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+            ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+            ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+        ).all()
+        
+        clientes_unicos = set()
+        comers_unicas = set()
+        total_valor_ventas = 0
+        total_valor_pagado = 0
+        
+        detalles_validacion = []
+        
+        for comercializacion in comercializaciones_abril:
+            # Validar usando la función exacta del compañero
+            if validar_cliente_pagado_completo(comercializacion.id, db):
+                clientes_unicos.add(comercializacion.ClienteId)
+                comers_unicas.add(comercializacion.id)
+                
+                # Calcular valor de ventas
+                valor_venta = comercializacion.ValorVenta or 0
+                total_valor_ventas += valor_venta
+                
+                # Calcular suma de pagos
+                facturas = db.query(models.Factura).filter(
+                    models.Factura.idComercializacion == comercializacion.id
+                ).all()
+                
+                suma_pagos_com = sum(f.Pagado for f in facturas if f.Pagado and f.Pagado > 0)
+                total_valor_pagado += suma_pagos_com
+                
+                # Agregar detalle para los primeros 10
+                if len(detalles_validacion) < 10:
+                    detalles_validacion.append({
+                        "comercializacion_id": comercializacion.id,
+                        "cliente_id": comercializacion.ClienteId,
+                        "cliente": comercializacion.Cliente,
+                        "codigo_cotizacion": comercializacion.CodigoCotizacion,
+                        "fecha_inicio": comercializacion.FechaInicio.isoformat() if comercializacion.FechaInicio else None,
+                        "valor_venta": valor_venta,
+                        "suma_pagos": suma_pagos_com,
+                        "diferencia": suma_pagos_com - valor_venta
+                    })
+        
+        return {
+            "metodo": "logica_exacta_companero",
+            "criterios": [
+                "FechaInicio en abril 2025 (NO fecha facturación)",
+                "Excluir códigos ADI, OTR, SPD", 
+                "Estado más reciente = 1 (terminada)",
+                "Factura con estado 3 y pagado > 0",
+                "Suma total pagos >= valor venta"
+            ],
+            "resultados": {
+                "comercializaciones_candidatas": len(comercializaciones_abril),
+                "comercializaciones_pagadas_completas": len(comers_unicas),
+                "clientes_unicos_pagados": len(clientes_unicos),
+                "total_valor_ventas": total_valor_ventas,
+                "total_valor_pagado": total_valor_pagado,
+                "diferencia": total_valor_pagado - total_valor_ventas
+            },
+            "sample_detalles": detalles_validacion,
+            "fecha_analisis": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error replicando lógica del compañero: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+        
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
