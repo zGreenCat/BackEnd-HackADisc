@@ -560,25 +560,39 @@ def delta_x(cliente_id: int = None, db: Session = Depends(get_db)):
 @app.get("/api/deltaY")
 @app.get("/api/deltaY/cliente/{cliente_id}")
 def delta_y(cliente_id: int = None, db: Session = Depends(get_db)):
-    """ΔY: Desde que se terminó la comercialización hasta primera factura"""
-    comercializaciones = db.query(models.Comercializacion).filter(
-        models.Comercializacion.id.in_(
-            db.query(models.Estado.idComercializacion).filter(models.Estado.EstadoComercializacion.in_([1, 3]))
-        )
-    )
+    """ΔY: Desde cuando el estado de comercio es 1 hasta la fecha de facturación de la primera factura"""
+    comercializaciones = db.query(models.Comercializacion)
     if cliente_id:
         comercializaciones = comercializaciones.filter(models.Comercializacion.ClienteId == cliente_id)
 
     valores = []
     for com in comercializaciones:
-        estados_terminados = [e for e in com.estados if e.EstadoComercializacion in [1, 3]]
-        if not estados_terminados or not com.Facturas:
+        # Buscar el estado 1 (comercialización terminada) para esta comercialización
+        estados_1 = db.query(models.Estado).filter(
+            models.Estado.idComercializacion == com.id,
+            models.Estado.EstadoComercializacion == 1
+        ).all()
+        
+        if not estados_1:
             continue
-        estado_final = max(estados_terminados, key=lambda e: e.Fecha)
-        primera_factura = min(com.Facturas, key=lambda f: f.FechaFacturacion or datetime.max)
+        
+        # Buscar facturas de esta comercialización
+        facturas = db.query(models.Factura).filter(
+            models.Factura.idComercializacion == com.id,
+            models.Factura.FechaFacturacion.isnot(None)
+        ).all()
+        
+        if not facturas:
+            continue
+        
+        # Tomar la fecha del estado 1 (puede haber varios, tomar el último)
+        fecha_estado_1 = max(estados_1, key=lambda e: e.Fecha).Fecha
+        
+        # Buscar la primera factura por fecha de facturación
+        primera_factura = min(facturas, key=lambda f: f.FechaFacturacion)
 
-        if estado_final.Fecha and primera_factura.FechaFacturacion:
-            dias = (primera_factura.FechaFacturacion - estado_final.Fecha).days
+        if fecha_estado_1 and primera_factura.FechaFacturacion:
+            dias = (primera_factura.FechaFacturacion - fecha_estado_1).days
             if dias >= 0:
                 valores.append(dias)
 
@@ -587,24 +601,33 @@ def delta_y(cliente_id: int = None, db: Session = Depends(get_db)):
 @app.get("/api/deltaZ")
 @app.get("/api/deltaZ/cliente/{cliente_id}")
 def delta_z(cliente_id: int = None, db: Session = Depends(get_db)):
-    """ΔZ: Desde primera factura hasta factura con pago"""
+    """ΔZ: Desde la fecha de facturación de la primera factura hasta la fecha del último pago"""
     comercializaciones = db.query(models.Comercializacion)
     if cliente_id:
         comercializaciones = comercializaciones.filter(models.Comercializacion.ClienteId == cliente_id)
 
     valores = []
     for com in comercializaciones:
-        if not com.Facturas:
+        # Buscar facturas de esta comercialización
+        facturas = db.query(models.Factura).filter(
+            models.Factura.idComercializacion == com.id,
+            models.Factura.FechaFacturacion.isnot(None)
+        ).all()
+        
+        if not facturas:
             continue
-        facturas_ordenadas = sorted([f for f in com.Facturas if f.FechaFacturacion], key=lambda f: f.FechaFacturacion)
-        if not facturas_ordenadas:
-            continue
-        primera = facturas_ordenadas[0]
-        pagadas = [f for f in com.Facturas if f.EstadoFactura in [3, 4] and f.FechaFacturacion]
-
-        if pagadas:
-            fecha_pago = min(pagadas, key=lambda f: f.FechaFacturacion).FechaFacturacion
-            dias = (fecha_pago - primera.FechaFacturacion).days
+        
+        # Buscar la primera factura por fecha de facturación
+        primera_factura = min(facturas, key=lambda f: f.FechaFacturacion)
+        
+        # Buscar facturas con estado de pago (3 o 4 = pagadas)
+        facturas_pagadas = [f for f in facturas if f.EstadoFactura in [3, 4]]
+        
+        if facturas_pagadas:
+            # Tomar la fecha del último pago (factura pagada más reciente)
+            ultima_factura_pagada = max(facturas_pagadas, key=lambda f: f.FechaFacturacion)
+            
+            dias = (ultima_factura_pagada.FechaFacturacion - primera_factura.FechaFacturacion).days
             if dias >= 0:
                 valores.append(dias)
 
@@ -613,19 +636,29 @@ def delta_z(cliente_id: int = None, db: Session = Depends(get_db)):
 @app.get("/api/deltaG")
 @app.get("/api/deltaG/cliente/{cliente_id}")
 def delta_g(cliente_id: int = None, db: Session = Depends(get_db)):
-    """ΔG: Desde inicio de comercialización hasta factura con pago"""
+    """ΔG: Desde el estado de comercio 0 (inicio) hasta la fecha del último pago"""
     comercializaciones = db.query(models.Comercializacion)
     if cliente_id:
         comercializaciones = comercializaciones.filter(models.Comercializacion.ClienteId == cliente_id)
 
     valores = []
     for com in comercializaciones:
-        if not com.FechaInicio or not com.Facturas:
+        # Verificar que tenga fecha de inicio
+        if not com.FechaInicio:
             continue
-        pagadas = [f for f in com.Facturas if f.EstadoFactura in [3, 4] and f.FechaFacturacion]
-        if pagadas:
-            fecha_pago = min(pagadas, key=lambda f: f.FechaFacturacion).FechaFacturacion
-            dias = (fecha_pago - com.FechaInicio).days
+        
+        # Buscar facturas de esta comercialización con estado de pago (3 o 4 = pagadas)
+        facturas_pagadas = db.query(models.Factura).filter(
+            models.Factura.idComercializacion == com.id,
+            models.Factura.EstadoFactura.in_([3, 4]),
+            models.Factura.FechaFacturacion.isnot(None)
+        ).all()
+        
+        if facturas_pagadas:
+            # Tomar la fecha del último pago (factura pagada más reciente)
+            ultima_factura_pagada = max(facturas_pagadas, key=lambda f: f.FechaFacturacion)
+            
+            dias = (ultima_factura_pagada.FechaFacturacion - com.FechaInicio).days
             if dias >= 0:
                 valores.append(dias)
 
