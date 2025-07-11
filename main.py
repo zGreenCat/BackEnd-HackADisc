@@ -19,6 +19,7 @@ from ml_predictor import modelo_ml
 from statistics import mean, stdev
 from fastapi import Path
 from sqlalchemy import func
+from database import get_db
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -45,16 +46,6 @@ app.add_middleware(
 
 # Cache en memoria para predicciones (en producción usar base de datos)
 predicciones_cache = []
-
-# ===== DEPENDENCY INJECTION =====
-
-def get_db():
-    """Dependency para acceder a la base de datos"""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 # ===== FUNCIONES AUXILIARES =====
 
@@ -379,6 +370,90 @@ def top_clientes_comercializaciones(db: Session = Depends(get_db)):
         "top_50_clientes": top_clientes,
         "total": len(top_clientes)
     }
+
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from database import get_db
+from models import MetricasTiempo, Comercializacion, Estado, Factura
+from datetime import date
+from collections import defaultdict
+
+router = APIRouter()
+
+@router.get("/metricas/historicas")
+def obtener_metricas_historicas(db: Session = Depends(get_db)):
+    """
+    Devuelve un JSON con deltas mensuales por cliente (para los 50 clientes en la tabla MetricasTiempo)
+    """
+    # Obtener clientes únicos de la tabla MetricasTiempo
+    clientes = db.query(MetricasTiempo.idCliente, MetricasTiempo.Cliente).distinct().all()
+    resultados = []
+
+    for id_cliente, nombre_cliente in clientes:
+        for año in [2023, 2024, 2025]:
+            max_mes = 12 if año < 2025 else 3
+            for mes in range(1, max_mes + 1):
+                fecha_inicio = date(año, mes, 1)
+                fecha_fin = date(año, mes, 28)  # Simplificamos
+
+                # Obtener comercializaciones válidas del cliente en ese mes
+                comercializaciones = (
+                    db.query(Comercializacion)
+                    .filter(Comercializacion.ClienteId == id_cliente)
+                    .filter(Comercializacion.FechaInicio >= fecha_inicio)
+                    .filter(Comercializacion.FechaInicio < date(año, mes + 1, 1) if mes < 12 else date(año + 1, 1, 1))
+                    .all()
+                )
+
+                delta_x_vals, delta_y_vals, delta_z_vals, delta_g_vals = [], [], [], []
+
+                for com in comercializaciones:
+                    estados = db.query(Estado).filter(Estado.idComercializacion == com.id).all()
+                    facturas = db.query(Factura).filter(Factura.idComercializacion == com.id).all()
+
+                    # === Delta X ===
+                    estado_terminado = next((e for e in estados if e.EstadoComercializacion in [1, 3]), None)
+                    if com.FechaInicio and estado_terminado and estado_terminado.Fecha:
+                        dx = (estado_terminado.Fecha - com.FechaInicio).days
+                        if dx >= 0: delta_x_vals.append(dx)
+
+                    # === Delta Y ===
+                    if estado_terminado and facturas:
+                        fecha_estado = estado_terminado.Fecha
+                        primera_factura = min(facturas, key=lambda f: f.FechaFacturacion or date.max)
+                        if fecha_estado and primera_factura.FechaFacturacion:
+                            dy = (primera_factura.FechaFacturacion - fecha_estado).days
+                            if dy >= 0: delta_y_vals.append(dy)
+
+                    # === Delta Z ===
+                    pagadas = [f for f in facturas if f.EstadoFactura in [3, 4] and f.Pagado and f.Pagado > 0]
+                    if facturas and pagadas:
+                        primera_factura = min(facturas, key=lambda f: f.FechaFacturacion or date.max)
+                        ultima_pagada = max(pagadas, key=lambda f: f.FechaFacturacion or date.min)
+                        if primera_factura.FechaFacturacion and ultima_pagada.FechaFacturacion:
+                            dz = (ultima_pagada.FechaFacturacion - primera_factura.FechaFacturacion).days
+                            if dz >= 0: delta_z_vals.append(dz)
+
+                    # === Delta G ===
+                    if com.FechaInicio and pagadas:
+                        ultima_pagada = max(pagadas, key=lambda f: f.FechaFacturacion or date.min)
+                        dg = (ultima_pagada.FechaFacturacion - com.FechaInicio).days
+                        if dg >= 0: delta_g_vals.append(dg)
+
+                # Resumen mensual
+                resultados.append({
+                    "cliente_id": id_cliente,
+                    "cliente": nombre_cliente,
+                    "año": año,
+                    "mes": mes,
+                    "delta_x": round(sum(delta_x_vals) / len(delta_x_vals), 2) if delta_x_vals else None,
+                    "delta_y": round(sum(delta_y_vals) / len(delta_y_vals), 2) if delta_y_vals else None,
+                    "delta_z": round(sum(delta_z_vals) / len(delta_z_vals), 2) if delta_z_vals else None,
+                    "delta_g": round(sum(delta_g_vals) / len(delta_g_vals), 2) if delta_g_vals else None
+                })
+
+    return {"metricas_historicas": resultados}
+
 
 # ===== ENDPOINT PARA PREDICCIONES DE INGRESOS MENSUALES =====
 
