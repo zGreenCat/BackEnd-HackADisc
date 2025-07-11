@@ -3,6 +3,7 @@
 env/
 ENV/
 venv/
+database.db
 
 # Archivos de Python compilados
 __pycache__/
