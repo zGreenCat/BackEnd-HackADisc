@@ -1,33 +1,36 @@
-# 🚀 HACKADISC - Backend Integrado con Predicciones ML
+# 🚀 HACKADISC - Backend con ML Avanzado
 
 ## 📋 Descripción del Proyecto
 
-Sistema backend completo que integra gestión de datos empresariales con predicciones de Machine Learning para predecir días de pago de ventas.
+Sistema backend completo con predicciones de Machine Learning para estimar días de pago. Incluye **modelo híbrido mejorado** con análisis temporal de ciclos de negocio por cliente.
 
-## 🏗️ Estructura del Proyecto
+## 🏗️ Estructura del Proyecto (PRODUCCIÓN)
 
 ```
-HACKADISC/
-└── BackEnd-HackADisc/            # Proyecto completo
-    ├── README.md                 # Este archivo
-    ├── main.py                   # 🚀 API FastAPI principal (endpoints)
-    ├── ml_predictor.py           # 🤖 Lógica de Machine Learning
-    ├── models.py                 # 📊 Modelos SQLAlchemy + Pydantic
-    ├── database.py               # 🗄️ Configuración de base de datos
-    ├── etl.py                    # 🔄 ETL para procesar datos
-    ├── requirements.txt          # 📦 Dependencias Python
-    ├── ventas.csv                # 📈 Datos originales de ventas
-    ├── facturas.csv              # 🧾 Datos originales de facturas  
-    ├── estados.csv               # 📋 Datos originales de estados
-    ├── modelo_hibrido.pkl        # 🤖 Modelo ML entrenado
-    ├── modelo_hibrido_metadata.pkl # 📊 Metadatos del modelo
-    ├── scaler_hibrido.pkl        # ⚖️ Scaler para normalización
-    ├── main_old.py               # 🗃️ Backup de versión anterior
-    ├── .git/                     # 🔧 Control de versiones
-    ├── .gitignore                # 🚫 Configuración git
-    └── data/
-        ├── database.db           # 🗃️ Base de datos SQLite
-        └── json_completo.json    # 📄 Datos procesados
+BackEnd-HackADisc/                # Proyecto en producción
+├── README.md                     # Este archivo
+├── main.py                       # 🚀 API FastAPI principal
+├── mainFrnnd.py                  # 🌐 API frontend alternativa  
+├── ml_predictor.py               # 🤖 Motor ML con modelo mejorado
+├── models.py                     # 📊 Modelos SQLAlchemy + Pydantic
+├── database.py                   # 🗄️ Configuración SQLite
+├── requirements.txt              # 📦 Dependencias Python
+├── json_completo.json            # � Datos fuente procesados
+├── .gitignore                    # 🚫 Configuración git
+├── data/
+│   └── database.db               # �️ Base de datos SQLite principal
+├── desarrollo_backup/            # 🛠️ Scripts de desarrollo
+│   ├── entrenar_modelo_hibrido_mejorado.py  # 🧠 Entrenamiento modelo mejorado
+│   ├── entrenar_modelo_hibrido.py           # 🤖 Entrenamiento modelo anterior
+│   └── etl.py                               # � ETL procesamiento datos
+├── modelos_backup/               # 💾 Modelos anteriores
+│   ├── modelo_hibrido.pkl        # 🤖 Modelo anterior (backup)
+│   ├── modelo_hibrido_metadata.pkl         # � Metadatos anterior
+│   └── scaler_hibrido.pkl                  # ⚖️ Scaler anterior
+└── **MODELO EN PRODUCCIÓN** 🚀
+    ├── modelo_hibrido_mejorado.pkl         # 🧠 Modelo mejorado actual
+    ├── modelo_hibrido_mejorado_metadata.pkl # 📊 Metadatos mejorados  
+    └── scaler_hibrido_mejorado.pkl         # ⚖️ Scaler mejorado
 ```
 
 ## 🎯 Funcionalidades
@@ -43,11 +46,11 @@ HACKADISC/
 - `GET /sence` - Estadísticas SENCE vs no-SENCE con porcentajes
 - `GET /clientes` - Lista de todos los clientes únicos
 
-### 🤖 **Endpoints de Machine Learning**
-- `POST /predecir` - Predicción individual de días de pago
+### 🤖 **Endpoints de Machine Learning Avanzado**
+- `POST /predecir` - Predicción individual con análisis temporal
 - `POST /predecir_lote` - Predicciones en lote (máx. 50)
 - `GET /estadisticas_ml` - Estadísticas de predicciones
-- `GET /modelo/info` - Información del modelo
+- `GET /modelo/info` - Información detallada del modelo mejorado
 - `GET /modelo/test` - Test rápido del modelo
 
 ## 🔧 Instalación y Ejecución

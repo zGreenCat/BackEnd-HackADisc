@@ -3,7 +3,6 @@
 env/
 ENV/
 venv/
-database.db
 
 # Archivos de Python compilados
 __pycache__/
@@ -12,19 +11,25 @@ __pycache__/
 
 # Archivos de logs o temporales
 *.log
+*temp*
+*debug*
+test_*
 
-# Archivos específicos a ignorar (no los datos del proyecto)
-temp.csv
-backup.json
-test.db
+# Archivos de desarrollo y backup (locales)
+desarrollo_backup/
+modelos_backup/
+*.png
+*.jpg
 
-# Archivos muy grandes (opcional - descomentar si causan problemas)
-*.json
-modelo_hibrido.pkl
+# Archivos muy grandes - mantener solo modelo en producción
+json_completo.json
+modelo_experimental*
+*experimental*
 
-# Pero mantener los metadatos y scaler (son pequeños)
-!modelo_hibrido_metadata.pkl
-!scaler_hibrido.pkl
+# MODELO EN PRODUCCIÓN (mantener estos)
+!modelo_hibrido_mejorado.pkl
+!modelo_hibrido_mejorado_metadata.pkl
+!scaler_hibrido_mejorado.pkl
 
 # Config VSCode
 .vscode/
@@ -35,6 +40,3 @@ Thumbs.db
 
 # Jupyter Notebooks checkpoints
 .ipynb_checkpoints/
-
-# Streamlit cache
-.streamlit/modelo_hibrido.pkl
