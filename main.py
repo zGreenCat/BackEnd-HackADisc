@@ -18,6 +18,7 @@ from models import VentaInput, PrediccionResponse, EstadisticasMLResponse, Predi
 from ml_predictor import modelo_ml
 from statistics import mean, stdev
 from fastapi import Path
+from sqlalchemy import func
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -344,6 +345,39 @@ def listar_clientes(db: Session = Depends(get_db)):
     return {
         "clientes": sorted(lista_clientes),
         "total_clientes": len(lista_clientes)
+    }
+
+@app.get("/clientes/top")
+def top_clientes_comercializaciones(db: Session = Depends(get_db)):
+    """
+    Devuelve el top 50 clientes con mayor número de comercializaciones,
+    incluyendo idCliente y nombre.
+    """
+    resultados = (
+        db.query(
+            models.Comercializacion.ClienteId,
+            models.Comercializacion.Cliente,
+            func.count(models.Comercializacion.id).label("cantidad")
+        )
+        .filter(models.Comercializacion.Cliente.isnot(None))
+        .group_by(models.Comercializacion.ClienteId, models.Comercializacion.Cliente)
+        .order_by(func.count(models.Comercializacion.id).desc())
+        .limit(50)
+        .all()
+    )
+
+    top_clientes = [
+        {
+            "cliente_id": r[0],
+            "cliente": r[1],
+            "comercializaciones": r[2]
+        }
+        for r in resultados if r[0] and r[1]
+    ]
+
+    return {
+        "top_50_clientes": top_clientes,
+        "total": len(top_clientes)
     }
 
 # ===== ENDPOINT PARA PREDICCIONES DE INGRESOS MENSUALES =====

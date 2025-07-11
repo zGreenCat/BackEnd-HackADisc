@@ -20,6 +20,7 @@ test.db
 
 # Archivos muy grandes (opcional - descomentar si causan problemas)
 json_completo.json
+json_top50.json
 modelo_hibrido.pkl
 
 # Pero mantener los metadatos y scaler (son pequeños)
