@@ -11,6 +11,7 @@ from datetime import datetime
 import logging
 import numpy as np
 import calendar
+import models
 # Imports locales
 from database import SessionLocal, engine
 import models
@@ -1395,53 +1396,9 @@ def calcular_proyeccion_anual_simplificada(
                                     "cantidad_facturas": 1
                                 }
                                 
-                                # Realizar predicción con el modelo mejorado
-                                resultado_pred = modelo_ml.predecir_dias_pago(datos_prediccion)
-                                dias_predichos = resultado_pred.get("dias_predichos", 99)
-                                
-                                # LÓGICA MEJORADA: Calcular probabilidad de pago en el mes
-                                # Simular que las ventas se hacen al principio del mes
-                                dias_mes = calendar.monthrange(ano, mes)[1]  # Días del mes
-                                
-                                # Probabilidad de que el pago llegue en este mes específico
-                                if dias_predichos <= dias_mes:
-                                    # Pago probable en este mes
-                                    probabilidad = 1.0
-                                elif dias_predichos <= dias_mes + 15:
-                                    # Pago parcialmente probable (spillover al siguiente mes)
-                                    probabilidad = 0.6
-                                elif dias_predichos <= dias_mes + 30:
-                                    # Pago menos probable
-                                    probabilidad = 0.3
-                                else:
-                                    # Pago muy improbable en este mes
-                                    probabilidad = 0.1
-                                
-                                # Agregar variabilidad mensual realista
-                                # Factores estacionales (algunos meses son mejores que otros)
-                                factores_estacionales = {
-                                    1: 0.9,   # Enero - inicio lento
-                                    2: 0.95,  # Febrero - repunte
-                                    3: 1.1,   # Marzo - fuerte
-                                    4: 1.05,  # Abril - bueno
-                                    5: 0.8,   # Mayo - bajada
-                                    6: 0.7,   # Junio - mínimo
-                                    7: 0.85,  # Julio - recuperación gradual
-                                    8: 0.9,   # Agosto - mejora
-                                    9: 1.0,   # Septiembre - normal
-                                    10: 1.1,  # Octubre - fuerte
-                                    11: 1.05, # Noviembre - bueno
-                                    12: 0.6   # Diciembre - mínimo navideño
-                                }
-                                
-                                factor_estacional = factores_estacionales.get(mes, 1.0)
-                                
-                                # Calcular valor final considerando probabilidad y estacionalidad
-                                valor_esperado = valor_promedio * probabilidad * factor_estacional
-                                
-                                # Solo incluir si el valor esperado es significativo
-                                if valor_esperado >= valor_promedio * 0.1:  # Al menos 10% del valor
-                                    valor_prediccion_mes += valor_esperado
+                                pred_result = modelo_ml.predecir_dias_pago(datos_prediccion)
+                                if pred_result.get("dias_predichos", 99) <= 31:
+                                    valor_prediccion_mes += valor_promedio
                                     cantidad_predicciones += 1
                                     
                         except Exception:
@@ -1454,9 +1411,9 @@ def calcular_proyeccion_anual_simplificada(
                         meses_desde_hoy = max(0, mes - fecha_actual.month)
                         factor_incertidumbre = max(0.7, 1.0 - (meses_desde_hoy * 0.05))
                         valor_prediccion_mes *= factor_incertidumbre
-                        
+                    
                 except Exception as e:
-                    logger.warning(f"Error en predicciones para {mes}/{ano}: {e}")
+                    datos_mes["predicciones"] = {"error": str(e)}
             
             # 3. DETERMINAR VALOR FINAL DEL MES
             if tiene_datos_reales:
@@ -1683,28 +1640,12 @@ def predecir_dias_pago_cliente(cliente_id: int, db: Session = Depends(get_db)):
             "cliente_nombre": cliente_info.Cliente,
             "prediccion": {
                 "dias_predichos": resultado_prediccion["dias_predichos"],
-                "nivel_riesgo": resultado_prediccion["nivel_riesgo"],
-                "codigo_riesgo": resultado_prediccion["codigo_riesgo"],
+                "nivel_riesgo": resultado_prediccion["codigo_riesgo"],
                 "descripcion_riesgo": resultado_prediccion["descripcion_riesgo"],
                 "accion_recomendada": resultado_prediccion["accion_recomendada"],
                 "confianza": resultado_prediccion["confianza"],
                 "se_paga_mismo_mes": resultado_prediccion["se_paga_mismo_mes"],
                 "explicacion_mes": resultado_prediccion["explicacion_mes"]
-            },
-            "datos_utilizados": {
-                "valor_venta_promedio": round(valor_promedio, 2),
-                "es_cliente_sence": es_cliente_sence,
-                "cantidad_facturas_promedio": cantidad_facturas_promedio,
-                "mes_prediccion": mes_actual,
-                "correo_asignado": correo_frecuente
-            },
-            "estadisticas_cliente": {
-                "total_comercializaciones": total_comercializaciones,
-                "comercializaciones_sence": comercializaciones_sence,
-                "porcentaje_sence": round((comercializaciones_sence / total_comercializaciones) * 100, 2),
-                "valor_minimo": min(valores_venta) if valores_venta else 0,
-                "valor_maximo": max(valores_venta) if valores_venta else 0,
-                "valor_promedio": round(valor_promedio, 2)
             },
             "fecha_prediccion": datetime.now().isoformat(),
             "modelo_version": resultado_prediccion.get("modelo_version", "Híbrido v2.0")
@@ -1771,7 +1712,7 @@ def predecir_dias_pago_cliente_resumen(cliente_id: int, db: Session = Depends(ge
         elif valor_promedio <= 500000:
             cantidad_facturas = 2
         else:
-            cantidad_facturas = 3
+                       cantidad_facturas = 3
         
         # Preparar datos mínimos para predicción
         datos_prediccion = {
@@ -1803,4 +1744,361 @@ def predecir_dias_pago_cliente_resumen(cliente_id: int, db: Session = Depends(ge
         raise
     except Exception as e:
         logger.error(f"Error en predicción resumida cliente {cliente_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+@app.get("/predecir_todos_clientes")
+def predecir_dias_pago_todos_clientes(
+    limite: int = 100, 
+    offset: int = 0,
+    solo_activos: bool = True,
+    incluir_detalles: bool = False,
+    db: Session = Depends(get_db)
+):
+    """
+    Predice los días de pago para todos los clientes únicos en la base de datos.
+    
+    Args:
+        limite: Máximo número de clientes a procesar (máximo 500)
+        offset: Número de clientes a saltar (para paginación)
+        solo_activos: Si true, solo clientes con comercializaciones recientes
+        incluir_detalles: Si incluir información detallada de cada cliente
+    
+    Returns:
+        Lista de predicciones para todos los clientes con sus estadísticas
+    """
+    if not modelo_ml.esta_disponible():
+        raise HTTPException(status_code=503, detail="Modelo de ML no disponible")
+    
+    # Validar parámetros
+    limite = min(max(limite, 1), 500)  # Entre 1 y 500
+    offset = max(offset, 0)
+    
+    try:
+        # 1. OBTENER CLIENTES ÚNICOS CON FILTROS
+        query_base = db.query(
+            models.Comercializacion.ClienteId,
+            models.Comercializacion.Cliente
+        ).filter(
+            models.Comercializacion.Cliente.isnot(None),
+            models.Comercializacion.ClienteId.isnot(None),
+            ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+            ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+            ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+        )
+        
+        # Filtro adicional para clientes activos
+        if solo_activos:
+            # Solo clientes con comercializaciones en los últimos 2 años
+            fecha_limite = datetime.now().replace(year=datetime.now().year - 2)
+            query_base = query_base.filter(
+                models.Comercializacion.FechaInicio >= fecha_limite
+            )
+        
+        # Obtener clientes únicos con paginación
+        clientes_unicos = query_base.distinct().offset(offset).limit(limite).all()
+        
+        if not clientes_unicos:
+            return {
+                "clientes_predicciones": [],
+                "resumen": {
+                    "total_procesados": 0,
+                    "exitosos": 0,
+                    "errores": 0
+                },
+                "paginacion": {
+                    "limite": limite,
+                    "offset": offset,
+                    "tiene_mas": False
+                },
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # 2. PROCESAR PREDICCIONES PARA CADA CLIENTE
+        predicciones_resultado = []
+        errores_count = 0
+        exitosos_count = 0
+        
+        for cliente_id, cliente_nombre in clientes_unicos:
+            try:
+                # Obtener estadísticas históricas del cliente
+                comercializaciones_cliente = db.query(models.Comercializacion).filter(
+                    models.Comercializacion.ClienteId == cliente_id,
+                    models.Comercializacion.ValorVenta.isnot(None),
+                    ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+                    ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+                    ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+                ).all()
+                if not comercializaciones_cliente:
+                    errores_count += 1
+                    continue
+                
+                # Calcular estadísticas del cliente
+                valores_venta = [c.ValorVenta for c in comercializaciones_cliente if c.ValorVenta and c.ValorVenta > 0]
+                valor_promedio = sum(valores_venta) / len(valores_venta) if valores_venta else 500000
+                
+                # Determinar tipo de cliente (SENCE vs COMERCIAL)
+                total_comercializaciones = len(comercializaciones_cliente)
+                comercializaciones_sence = sum(1 for c in comercializaciones_cliente if c.EsSENCE)
+                es_cliente_sence = comercializaciones_sence > (total_comercializaciones / 2)
+                
+                # Calcular cantidad de facturas típica
+                if valor_promedio <= 200000:
+                    cantidad_facturas = 1
+                elif valor_promedio <= 500000:
+                    cantidad_facturas = 2
+                else:
+                    cantidad_facturas = 3
+                
+                # Preparar datos para predicción
+                datos_prediccion = {
+                    "cliente": cliente_nombre,
+                    "correo_creador": "sence@insecap.cl" if es_cliente_sence else "comercial@insecap.cl",
+                    "valor_venta": valor_promedio,
+                    "es_sence": es_cliente_sence,
+                    "mes_facturacion": datetime.now().month,
+                    "cantidad_facturas": cantidad_facturas
+                }
+                
+                # Realizar predicción
+                resultado_prediccion = modelo_ml.predecir_dias_pago(datos_prediccion)
+                
+                # Preparar respuesta del cliente
+                cliente_prediccion = {
+                    "cliente_id": cliente_id,
+                    "cliente_nombre": cliente_nombre,
+                    "prediccion": {
+                        "dias_predichos": resultado_prediccion["dias_predichos"],
+                        "nivel_riesgo": resultado_prediccion["codigo_riesgo"],
+                        "se_paga_este_mes": resultado_prediccion["se_paga_mismo_mes"],
+                        "confianza": round(resultado_prediccion["confianza"], 3)
+                    },
+                    "perfil_cliente": {
+                        "tipo": "SENCE" if es_cliente_sence else "COMERCIAL",
+                        "valor_promedio": round(valor_promedio, 2),
+                        "total_comercializaciones": total_comercializaciones,
+                        "porcentaje_sence": round((comercializaciones_sence / total_comercializaciones) * 100, 1)
+                    }
+                }
+                
+                # Agregar detalles adicionales si se solicitan
+                if incluir_detalles:
+                    cliente_prediccion["detalles"] = {
+                        "descripcion_riesgo": resultado_prediccion["descripcion_riesgo"],
+                        "accion_recomendada": resultado_prediccion["accion_recomendada"],
+                        "explicacion_mes": resultado_prediccion["explicacion_mes"],
+                        "comercializaciones_historicas": len(comercializaciones_cliente),
+                        "ultima_comercializacion": max(c.FechaInicio for c in comercializaciones_cliente if c.FechaInicio).isoformat() if comercializaciones_cliente else None
+                    }
+                
+                predicciones_resultado.append(cliente_prediccion)
+                exitosos_count += 1
+                
+            except Exception as e:
+                logger.warning(f"Error procesando cliente {cliente_id}: {e}")
+                errores_count += 1
+                
+                # Agregar registro de error si se incluyen detalles
+                if incluir_detalles:
+                    predicciones_resultado.append({
+                        "cliente_id": cliente_id,
+                        "cliente_nombre": cliente_nombre,
+                        "error": str(e),
+                        "procesado": False
+                    })
+        
+        # 3. CALCULAR ESTADÍSTICAS GENERALES
+        if predicciones_resultado:
+            # Filtrar solo predicciones exitosas para estadísticas
+            predicciones_validas = [p for p in predicciones_resultado if "prediccion" in p]
+            
+            if predicciones_validas:
+                dias_promedio = sum(p["prediccion"]["dias_predichos"] for p in predicciones_validas) / len(predicciones_validas)
+                
+                # Distribución de riesgos
+                distribucion_riesgo = {}
+                for p in predicciones_validas:
+                    riesgo = p["prediccion"]["nivel_riesgo"]
+                    distribucion_riesgo[riesgo] = distribucion_riesgo.get(riesgo, 0) + 1
+                
+                # Clientes que pagan este mes
+                pagan_este_mes = sum(1 for p in predicciones_validas if p["prediccion"]["se_paga_este_mes"])
+                
+                estadisticas_generales = {
+                    "dias_promedio_predicho": round(dias_promedio, 2),
+                    "distribucion_riesgo": distribucion_riesgo,
+                    "clientes_pagan_este_mes": pagan_este_mes,
+                    "porcentaje_pagan_este_mes": round((pagan_este_mes / len(predicciones_validas)) * 100, 2),
+                    "confianza_promedio": round(sum(p["prediccion"]["confianza"] for p in predicciones_validas) / len(predicciones_validas), 3)
+                }
+            else:
+                estadisticas_generales = {"error": "No hay predicciones válidas para calcular estadísticas"}
+        else:
+            estadisticas_generales = {"error": "No se procesaron clientes"}
+        
+        # 4. VERIFICAR SI HAY MÁS CLIENTES
+        total_clientes_disponibles = query_base.distinct().count()
+        tiene_mas = (offset + limite) < total_clientes_disponibles
+        
+        # 5. RESPUESTA FINAL
+        return {
+            "clientes_predicciones": predicciones_resultado,
+            "resumen": {
+                "total_procesados": len(clientes_unicos),
+                "exitosos": exitosos_count,
+                "errores": errores_count,
+                "tasa_exito": round((exitosos_count / len(clientes_unicos)) * 100, 2) if clientes_unicos else 0
+            },
+            "estadisticas_generales": estadisticas_generales,
+            "paginacion": {
+                "limite": limite,
+                "offset": offset,
+                "total_disponibles": total_clientes_disponibles,
+                "tiene_mas": tiene_mas,
+                "siguiente_offset": offset + limite if tiene_mas else None
+            },
+            "configuracion": {
+                "solo_activos": solo_activos,
+                "incluir_detalles": incluir_detalles,
+                "filtros_aplicados": ["ADI%", "OTR%", "SPD%"]
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error en predicciones masivas: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+@app.get("/predecir_todos_clientes/resumen")
+def predecir_todos_clientes_resumen(
+    limite: int = 50,
+    solo_top_clientes: bool = True,
+    db: Session = Depends(get_db)
+):
+    """
+    Versión resumida y rápida de predicciones para todos los clientes.
+    Ideal para dashboards y vistas generales.
+    
+    Args:
+        limite: Máximo número de clientes a procesar (máximo 200)
+        solo_top_clientes: Si true, solo los clientes con más comercializaciones
+    
+    Returns:
+        Resumen ejecutivo de predicciones de todos los clientes
+    """
+    if not modelo_ml.esta_disponible():
+        raise HTTPException(status_code=503, detail="Modelo de ML no disponible")
+    
+    limite = min(max(limite, 10), 200)
+    
+    try:
+        # Obtener clientes ordenados por actividad
+        if solo_top_clientes:
+            clientes_query = (
+                db.query(
+                    models.Comercializacion.ClienteId,
+                    models.Comercializacion.Cliente,
+                    func.count(models.Comercializacion.id).label("total_comercializaciones")
+                )
+                .filter(
+                    models.Comercializacion.Cliente.isnot(None),
+                    models.Comercializacion.ClienteId.isnot(None),
+                    ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+                    ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+                    ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+                )
+                .group_by(models.Comercializacion.ClienteId, models.Comercializacion.Cliente)
+                .order_by(func.count(models.Comercializacion.id).desc())
+                .limit(limite)
+                .all()
+            )
+        else:
+            clientes_query = (
+                db.query(
+                    models.Comercializacion.ClienteId,
+                    models.Comercializacion.Cliente
+                )
+                .filter(
+                    models.Comercializacion.Cliente.isnot(None),
+                    models.Comercializacion.ClienteId.isnot(None),
+                    ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+                    ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+                    ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+                )
+                .distinct()
+                .limit(limite)
+                .all()
+            )
+        
+        resultados_resumidos = []
+        
+        for item in clientes_query:
+            if solo_top_clientes:
+                cliente_id, cliente_nombre, total_coms = item
+            else:
+                cliente_id, cliente_nombre = item
+                total_coms = None
+            
+            try:
+                # Datos básicos para predicción rápida
+                com_sample = db.query(models.Comercializacion).filter(
+                    models.Comercializacion.ClienteId == cliente_id,
+                    models.Comercializacion.ValorVenta.isnot(None)
+                ).first()
+                
+                if not com_sample:
+                    continue
+                
+                # Predicción básica
+                datos_minimos = {
+                    "cliente": cliente_nombre,
+                    "correo_creador": "general@insecap.cl",
+                    "valor_venta": com_sample.ValorVenta or 500000,
+                    "es_sence": bool(com_sample.EsSENCE),
+                    "mes_facturacion": datetime.now().month,
+                    "cantidad_facturas": 2
+                }
+                
+                resultado = modelo_ml.predecir_dias_pago(datos_minimos)
+                
+                resultados_resumidos.append({
+                    "cliente_id": cliente_id,
+                    "cliente": cliente_nombre,
+                    "dias_predichos": resultado["dias_predichos"],
+                    "riesgo": resultado["codigo_riesgo"],
+                    "paga_este_mes": resultado["se_paga_mismo_mes"],
+                    "tipo": "SENCE" if datos_minimos["es_sence"] else "COMERCIAL"
+                })
+                
+            except Exception:
+                continue  # Saltar errores individuales
+        
+        # Calcular estadísticas rápidas
+        if resultados_resumidos:
+            riesgos = [r["riesgo"] for r in resultados_resumidos]
+            distribucion = {riesgo: riesgos.count(riesgo) for riesgo in set(riesgos)}
+            
+            pagan_mes = sum(1 for r in resultados_resumidos if r["paga_este_mes"])
+            
+            estadisticas = {
+                "total_clientes": len(resultados_resumidos),
+                "promedio_dias": round(sum(r["dias_predichos"] for r in resultados_resumidos) / len(resultados_resumidos), 1),
+                "distribucion_riesgo": distribucion,
+                "pagan_este_mes": pagan_mes,
+                "porcentaje_pagan_mes": round((pagan_mes / len(resultados_resumidos)) * 100, 1)
+            }
+        else:
+            estadisticas = {"error": "No se pudieron procesar clientes"}
+        
+        return {
+            "resumen_clientes": resultados_resumidos,
+            "estadisticas": estadisticas,
+            "configuracion": {
+                "limite_procesado": len(resultados_resumidos),
+                "solo_top_clientes": solo_top_clientes
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error en resumen de predicciones: {e}")
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
