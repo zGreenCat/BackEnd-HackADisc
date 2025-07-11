@@ -14,7 +14,7 @@ import calendar
 # Imports locales
 from database import SessionLocal, engine
 import models
-from models import VentaInput, PrediccionResponse, EstadisticasMLResponse
+from models import VentaInput, PrediccionResponse, EstadisticasMLResponse, PrediccionAlmacenadaInput, PrediccionAlmacenadaResponse, AnalisisHistoricoResponse, GenerarPrediccionesMasivasInput
 from ml_predictor import modelo_ml
 from statistics import mean, stdev
 from fastapi import Path
@@ -116,7 +116,7 @@ def resumen(db: Session = Depends(get_db)):
         "total_general": total_ventas + total_facturas + total_estados
     }
 
-@app.get("/")
+@app.get("/comercializaciones")
 def obtener_comercializaciones(limit: int = 100, offset: int = 0, db: Session = Depends(get_db)):
     """Devuelve comercializaciones con paginación"""
     comercializaciones = db.query(models.Comercializacion).offset(offset).limit(limit).all()
@@ -668,6 +668,363 @@ def delta_g(cliente_id: int = None, db: Session = Depends(get_db)):
                 valores.append(dias)
 
     return calcular_metricas(valores)
+
+# ===== ENDPOINTS DE PREDICCIONES ALMACENADAS =====
+
+@app.post("/predicciones/generar_masivas")
+def generar_predicciones_masivas(input_data: GenerarPrediccionesMasivasInput, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """
+    Genera predicciones masivas para todos los clientes activos para un rango de años
+    Esto es útil para pre-calcular predicciones para 2025-2026
+    """
+    if not modelo_ml.esta_disponible():
+        raise HTTPException(status_code=503, detail="Modelo de ML no disponible")
+    
+    from datetime import datetime, timedelta
+    import calendar
+    
+    # Obtener clientes activos
+    if input_data.incluir_clientes_activos_solamente:
+        # Clientes con comercializaciones en los últimos 12 meses
+        fecha_limite = datetime.now() - timedelta(days=365)
+        query = db.query(models.Comercializacion.ClienteId, models.Comercializacion.Cliente, models.Comercializacion.LiderComercial).filter(
+            models.Comercializacion.FechaInicio >= fecha_limite.date()
+        ).distinct()
+    else:
+        query = db.query(models.Comercializacion.ClienteId, models.Comercializacion.Cliente, models.Comercializacion.LiderComercial).distinct()
+    
+    if input_data.limite_clientes:
+        query = query.limit(input_data.limite_clientes)
+    
+    clientes = query.all()
+    
+    def tarea_generar_predicciones():
+        predicciones_creadas = 0
+        errores = 0
+        
+        for cliente_id, cliente_nombre, lider_comercial in clientes:
+            if not cliente_id or not cliente_nombre:
+                continue
+                
+            # Calcular valor promedio de venta del cliente
+            valor_promedio = db.query(models.Comercializacion.ValorVenta).filter(
+                models.Comercializacion.ClienteId == cliente_id,
+                models.Comercializacion.ValorVenta.isnot(None)
+            ).all()
+            
+            if not valor_promedio:
+                continue
+                
+            valor_venta = sum(v[0] for v in valor_promedio if v[0]) / len(valor_promedio)
+            
+            # Determinar si es cliente SENCE
+            sence_info = db.query(models.Comercializacion.EsSENCE).filter(
+                models.Comercializacion.ClienteId == cliente_id
+            ).first()
+            es_sence = bool(sence_info[0]) if sence_info else False
+            
+            # Generar predicciones para cada mes del rango de años
+            for ano in range(input_data.ano_inicio, input_data.ano_fin + 1):
+                for mes in range(1, 13):
+                    # Verificar si ya existe predicción
+                    if not input_data.sobrescribir_existentes:
+                        existe = db.query(models.PrediccionAlmacenada).filter(
+                            models.PrediccionAlmacenada.cliente_id == cliente_id,
+                            models.PrediccionAlmacenada.mes_prediccion == mes,
+                            models.PrediccionAlmacenada.ano_prediccion == ano,
+                            models.PrediccionAlmacenada.activa == True
+                        ).first()
+                        
+                        if existe:
+                            continue
+                    
+                    try:
+                        # Preparar datos para predicción
+                        datos_prediccion = {
+                            "cliente": cliente_nombre,
+                            "correo_creador": "sistema@insecap.cl",
+                            "valor_venta": valor_venta,
+                            "es_sence": es_sence,
+                            "mes_facturacion": mes,
+                            "cantidad_facturas": 1
+                        }
+                        
+                        # Realizar predicción
+                        resultado = modelo_ml.predecir_dias_pago(datos_prediccion)
+                        
+                        # Calcular fecha estimada de pago
+                        primer_dia_mes = datetime(ano, mes, 1)
+                        fecha_pago_estimada = primer_dia_mes + timedelta(days=resultado["dias_predichos"])
+                        
+                        # Crear registro en base de datos
+                        prediccion = models.PrediccionAlmacenada(
+                            cliente_id=cliente_id,
+                            cliente_nombre=cliente_nombre,
+                            lider_comercial=lider_comercial or "Sin asignar",
+                            valor_venta=valor_venta,
+                            es_sence=es_sence,
+                            mes_prediccion=mes,
+                            ano_prediccion=ano,
+                            dias_predichos=resultado["dias_predichos"],
+                            fecha_pago_estimada=fecha_pago_estimada.date(),
+                            nivel_riesgo=resultado["nivel_riesgo"],
+                            codigo_riesgo=resultado["codigo_riesgo"],
+                            confianza=resultado["confianza"],
+                            fecha_creacion=datetime.now(),
+                            modelo_version="v3.0-hibrido",
+                            activa=True,
+                            notas=f"Predicción masiva generada automáticamente para {calendar.month_name[mes]} {ano}"
+                        )
+                        
+                        db.add(prediccion)
+                        predicciones_creadas += 1
+                        
+                    except Exception as e:
+                        errores += 1
+                        logger.error(f"Error generando predicción para cliente {cliente_id}, {mes}/{ano}: {e}")
+        
+        try:
+            db.commit()
+            logger.info(f"Predicciones masivas completadas: {predicciones_creadas} creadas, {errores} errores")
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error al guardar predicciones masivas: {e}")
+    
+    # Ejecutar como tarea en background
+    background_tasks.add_task(tarea_generar_predicciones)
+    
+    return {
+        "mensaje": "Generación de predicciones masivas iniciada",
+        "clientes_a_procesar": len(clientes),
+        "rango_anos": f"{input_data.ano_inicio}-{input_data.ano_fin}",
+        "total_predicciones_estimadas": len(clientes) * (input_data.ano_fin - input_data.ano_inicio + 1) * 12,
+        "timestamp": datetime.now()
+    }
+
+@app.get("/predicciones/cliente/{cliente_id}")
+def obtener_predicciones_cliente(cliente_id: int, ano: int = None, mes: int = None, db: Session = Depends(get_db)):
+    """
+    Obtiene todas las predicciones almacenadas para un cliente específico
+    Opcionalmente filtrar por año y/o mes
+    """
+    query = db.query(models.PrediccionAlmacenada).filter(
+        models.PrediccionAlmacenada.cliente_id == cliente_id,
+        models.PrediccionAlmacenada.activa == True
+    )
+    
+    if ano:
+        query = query.filter(models.PrediccionAlmacenada.ano_prediccion == ano)
+    if mes:
+        query = query.filter(models.PrediccionAlmacenada.mes_prediccion == mes)
+    
+    predicciones = query.order_by(
+        models.PrediccionAlmacenada.ano_prediccion.asc(),
+        models.PrediccionAlmacenada.mes_prediccion.asc()
+    ).all()
+    
+    if not predicciones:
+        raise HTTPException(status_code=404, detail="No se encontraron predicciones para este cliente")
+    
+    return {
+        "cliente_id": cliente_id,
+        "cliente_nombre": predicciones[0].cliente_nombre,
+        "total_predicciones": len(predicciones),
+        "predicciones": [
+            {
+                "id": p.id,
+                "mes": p.mes_prediccion,
+                "ano": p.ano_prediccion,
+                "dias_predichos": p.dias_predichos,
+                "fecha_pago_estimada": p.fecha_pago_estimada,
+                "nivel_riesgo": p.nivel_riesgo,
+                "confianza": p.confianza,
+                "valor_venta": p.valor_venta,
+                "es_sence": p.es_sence
+            } for p in predicciones
+        ]
+    }
+
+@app.get("/predicciones/mes/{ano}/{mes}")
+def obtener_predicciones_mes(ano: int, mes: int, limite: int = 100, db: Session = Depends(get_db)):
+    """
+    Obtiene todas las predicciones para un mes específico
+    Útil para planificación de ingresos mensuales
+    """
+    if not (1 <= mes <= 12):
+        raise HTTPException(status_code=400, detail="Mes debe estar entre 1 y 12")
+    
+    predicciones = db.query(models.PrediccionAlmacenada).filter(
+        models.PrediccionAlmacenada.ano_prediccion == ano,
+        models.PrediccionAlmacenada.mes_prediccion == mes,
+        models.PrediccionAlmacenada.activa == True
+    ).limit(limite).all()
+    
+    if not predicciones:
+        raise HTTPException(status_code=404, detail=f"No se encontraron predicciones para {mes}/{ano}")
+    
+    # Calcular métricas agregadas
+    total_valor_estimado = sum(p.valor_venta for p in predicciones)
+    promedio_dias = sum(p.dias_predichos for p in predicciones) / len(predicciones)
+    
+    distribucion_riesgo = {}
+    for p in predicciones:
+        distribucion_riesgo[p.nivel_riesgo] = distribucion_riesgo.get(p.nivel_riesgo, 0) + 1
+    
+    return {
+        "mes": mes,
+        "ano": ano,
+        "total_predicciones": len(predicciones),
+        "resumen": {
+            "valor_total_estimado": round(total_valor_estimado, 2),
+            "promedio_dias_pago": round(promedio_dias, 2),
+            "distribucion_riesgo": distribucion_riesgo
+        },
+        "predicciones": [
+            {
+                "cliente_id": p.cliente_id,
+                "cliente_nombre": p.cliente_nombre,
+                "lider_comercial": p.lider_comercial,
+                "dias_predichos": p.dias_predichos,
+                "fecha_pago_estimada": p.fecha_pago_estimada,
+                "nivel_riesgo": p.nivel_riesgo,
+                "valor_venta": p.valor_venta,
+                "es_sence": p.es_sence
+            } for p in predicciones
+        ]
+    }
+
+# ===== ENDPOINTS DE ANÁLISIS HISTÓRICO =====
+
+@app.get("/analisis/cliente/{cliente_id}")
+def obtener_analisis_historico_cliente(cliente_id: int, db: Session = Depends(get_db)):
+    """
+    Obtiene el análisis histórico completo de un cliente específico
+    Incluye todos los deltas y estadísticas de comportamiento de pago
+    """
+    # Verificar que el cliente existe
+    cliente_info = db.query(models.Comercializacion).filter(
+        models.Comercializacion.ClienteId == cliente_id
+    ).first()
+    
+    if not cliente_info:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    
+    # Usar los endpoints existentes para calcular deltas
+    delta_x_result = delta_x(cliente_id, db)
+    delta_y_result = delta_y(cliente_id, db)
+    delta_z_result = delta_z(cliente_id, db)
+    delta_g_result = delta_g(cliente_id, db)
+    
+    # Calcular estadísticas adicionales
+    total_comercializaciones = db.query(models.Comercializacion).filter(
+        models.Comercializacion.ClienteId == cliente_id
+    ).count()
+    
+    valor_promedio = db.query(models.Comercializacion.ValorVenta).filter(
+        models.Comercializacion.ClienteId == cliente_id,
+        models.Comercializacion.ValorVenta.isnot(None)
+    ).all()
+    
+    comercializaciones_sence = db.query(models.Comercializacion).filter(
+        models.Comercializacion.ClienteId == cliente_id,
+        models.Comercializacion.EsSENCE == 1
+    ).count()
+    
+    return {
+        "cliente_id": cliente_id,
+        "cliente_nombre": cliente_info.Cliente,
+        "lider_comercial": cliente_info.LiderComercial,
+        "deltas": {
+            "delta_x": delta_x_result,
+            "delta_y": delta_y_result, 
+            "delta_z": delta_z_result,
+            "delta_g": delta_g_result
+        },
+        "estadisticas_generales": {
+            "total_comercializaciones": total_comercializaciones,
+            "valor_promedio_venta": round(sum(v[0] for v in valor_promedio if v[0]) / len(valor_promedio), 2) if valor_promedio else 0,
+            "porcentaje_sence": round((comercializaciones_sence / total_comercializaciones) * 100, 2) if total_comercializaciones > 0 else 0,
+            "fecha_analisis": datetime.now()
+        }
+    }
+
+@app.get("/analisis/lider/{lider_comercial}")
+def obtener_analisis_historico_lider(lider_comercial: str, db: Session = Depends(get_db)):
+    """
+    Obtiene el análisis histórico agregado de todos los clientes de un líder comercial
+    """
+    # Verificar que el líder existe
+    lider_info = db.query(models.Comercializacion).filter(
+        models.Comercializacion.LiderComercial == lider_comercial
+    ).first()
+    
+    if not lider_info:
+        raise HTTPException(status_code=404, detail="Líder comercial no encontrado")
+    
+    # Obtener todos los clientes del líder
+    clientes = db.query(models.Comercializacion.ClienteId, models.Comercializacion.Cliente).filter(
+        models.Comercializacion.LiderComercial == lider_comercial
+    ).distinct().all()
+    
+    # Calcular métricas agregadas
+    total_comercializaciones = db.query(models.Comercializacion).filter(
+        models.Comercializacion.LiderComercial == lider_comercial
+    ).count()
+    
+    # Aplicar análisis de deltas para todo el líder comercial usando filtro en deltaG
+    facturas_pagadas = db.query(models.Factura).join(
+        models.Comercializacion, models.Factura.idComercializacion == models.Comercializacion.id
+    ).filter(
+        models.Comercializacion.LiderComercial == lider_comercial,
+        models.Factura.EstadoFactura.in_([3, 4]),
+        models.Factura.FechaFacturacion.isnot(None),
+        models.Factura.Pagado.isnot(None),
+        models.Factura.Pagado > 0,
+        models.Comercializacion.FechaInicio.isnot(None)
+    ).all()
+    
+    valores_g = []
+    comercializaciones_procesadas = set()
+    
+    for factura in facturas_pagadas:
+        com_id = factura.idComercializacion
+        if com_id in comercializaciones_procesadas:
+            continue
+            
+        com = db.query(models.Comercializacion).filter(models.Comercializacion.id == com_id).first()
+        if not com or not com.FechaInicio:
+            continue
+            
+        # Buscar última factura pagada de esta comercialización
+        facturas_com = db.query(models.Factura).filter(
+            models.Factura.idComercializacion == com_id,
+            models.Factura.EstadoFactura.in_([3, 4]),
+            models.Factura.FechaFacturacion.isnot(None),
+            models.Factura.Pagado.isnot(None),
+            models.Factura.Pagado > 0
+        ).all()
+        
+        if facturas_com:
+            ultima_factura = max(facturas_com, key=lambda f: f.FechaFacturacion)
+            dias = (ultima_factura.FechaFacturacion - com.FechaInicio).days
+            if dias >= 0:
+                valores_g.append(dias)
+                
+        comercializaciones_procesadas.add(com_id)
+    
+    return {
+        "lider_comercial": lider_comercial,
+        "total_clientes": len(clientes),
+        "total_comercializaciones": total_comercializaciones,
+        "tiempo_promedio_cobro": calcular_metricas(valores_g),
+        "clientes": [
+            {
+                "cliente_id": cliente_id,
+                "cliente_nombre": cliente_nombre
+            } for cliente_id, cliente_nombre in clientes
+        ],
+        "fecha_analisis": datetime.now()
+    }
 
 if __name__ == "__main__":
     import uvicorn
