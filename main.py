@@ -1,5 +1,5 @@
 """
-🚀 BACKEND PRINCIPAL - HACKADISC
+BACKEND PRINCIPAL - HACKADISC
 API FastAPI con endpoints de datos y predicciones ML
 """
 
@@ -63,6 +63,20 @@ def guardar_prediccion_cache(input_data: dict, response_data: dict):
     # Mantener solo últimas 1000 predicciones
     if len(predicciones_cache) > 1000:
         predicciones_cache.pop(0)
+
+def _obtener_descripcion_estado(estado: int) -> str:
+    """
+    Función auxiliar para obtener descripción del estado de comercialización
+    """
+    estados_descripcion = {
+        0: "En proceso",
+        1: "Terminada/Completada",
+        2: "Cancelada",
+        3: "Facturada",
+        4: "En revisión",
+        5: "Pendiente de aprobación"
+    }
+    return estados_descripcion.get(estado, f"Estado {estado} (no definido)")
 
 def validar_cliente_pagado_completo(comercializacion_id: int, db: Session) -> bool:
     """
@@ -550,42 +564,204 @@ def listar_clientes(db: Session = Depends(get_db)):
     }
 
 @app.get("/clientes/top")
-def top_clientes_comercializaciones(db: Session = Depends(get_db)):
+def todos_clientes_comercializaciones(
+    limite: int = 1000,
+    ordenar_por: str = "comercializaciones",
+    orden: str = "desc",
+    db: Session = Depends(get_db)
+):
     """
-    Devuelve el top 50 clientes con mayor número de comercializaciones,
+    Devuelve TODOS los clientes con su total de comercializaciones,
     incluyendo idCliente y nombre (filtrar ADI, OTR, SPD).
+    
+    Args:
+        limite: Máximo número de clientes a devolver (por defecto 1000, máximo 2000)
+        ordenar_por: Campo para ordenar - "comercializaciones" o "nombre" (por defecto "comercializaciones")
+        orden: Orden - "desc" o "asc" (por defecto "desc")
+    
+    Returns:
+        Lista completa de clientes con su total de comercializaciones
     """
-    resultados = (
-        db.query(
-            models.Comercializacion.ClienteId,
-            models.Comercializacion.Cliente,
-            func.count(models.Comercializacion.id).label("cantidad")
+    limite = min(max(limite, 10), 2000)  # Entre 10 y 2000
+    
+    try:
+        logger.info(f"Consultando todos los clientes con total de comercializaciones (límite: {limite})...")
+        
+        # Query principal: obtener TODOS los clientes con su conteo de comercializaciones
+        query = (
+            db.query(
+                models.Comercializacion.ClienteId,
+                models.Comercializacion.Cliente,
+                func.count(models.Comercializacion.id).label("total_comercializaciones"),
+                func.sum(models.Comercializacion.EsSENCE).label("comercializaciones_sence"),
+                func.sum(models.Comercializacion.ValorVenta).label("valor_total"),
+                func.avg(models.Comercializacion.ValorVenta).label("valor_promedio"),
+                func.min(models.Comercializacion.FechaInicio).label("primera_comercializacion"),
+                func.max(models.Comercializacion.FechaInicio).label("ultima_comercializacion")
+            )
+            .filter(
+                models.Comercializacion.Cliente.isnot(None),
+                models.Comercializacion.ClienteId.isnot(None),
+                # Filtros estándar de exclusión
+                ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+                ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+                ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+            )
+            .group_by(models.Comercializacion.ClienteId, models.Comercializacion.Cliente)
         )
-        .filter(
-            models.Comercializacion.Cliente.isnot(None),
-            ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
-            ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
-            ~models.Comercializacion.CodigoCotizacion.like('SPD%')
-        )
-        .group_by(models.Comercializacion.ClienteId, models.Comercializacion.Cliente)
-        .order_by(func.count(models.Comercializacion.id).desc())
-        .limit(50)
-        .all()
-    )
-
-    top_clientes = [
-        {
-            "cliente_id": r[0],
-            "cliente": r[1],
-            "comercializaciones": r[2]
+        
+        # Aplicar ordenamiento
+        if ordenar_por == "nombre":
+            if orden == "asc":
+                query = query.order_by(models.Comercializacion.Cliente.asc())
+            else:
+                query = query.order_by(models.Comercializacion.Cliente.desc())
+        else:  # ordenar_por == "comercializaciones" (por defecto)
+            if orden == "asc":
+                query = query.order_by(func.count(models.Comercializacion.id).asc())
+            else:
+                query = query.order_by(func.count(models.Comercializacion.id).desc())
+        
+        # Aplicar límite
+        resultados = query.limit(limite).all()
+        
+        logger.info(f"Consulta completada: {len(resultados)} clientes encontrados")
+        
+        # Procesar resultados con información detallada
+        clientes_completos = []
+        
+        for resultado in resultados:
+            # Calcular días desde última comercialización
+            dias_desde_ultima = None
+            if resultado.ultima_comercializacion:
+                dias_desde_ultima = (datetime.now().date() - resultado.ultima_comercializacion.date()).days
+            
+            # Calcular estadísticas adicionales
+            comercializaciones_sence = int(resultado.comercializaciones_sence) if resultado.comercializaciones_sence else 0
+            comercializaciones_comerciales = resultado.total_comercializaciones - comercializaciones_sence
+            
+            cliente_data = {
+                "cliente_id": resultado.ClienteId,
+                "cliente_nombre": resultado.Cliente,
+                "estadisticas_comercializaciones": {
+                    "total_comercializaciones": resultado.total_comercializaciones,
+                    "comercializaciones_sence": comercializaciones_sence,
+                    "comercializaciones_comerciales": comercializaciones_comerciales,
+                    "porcentaje_sence": round((comercializaciones_sence / resultado.total_comercializaciones) * 100, 1) if resultado.total_comercializaciones > 0 else 0
+                },
+                "estadisticas_financieras": {
+                    "valor_total": float(resultado.valor_total) if resultado.valor_total else 0,
+                    "valor_promedio": float(resultado.valor_promedio) if resultado.valor_promedio else 0
+                },
+                "estadisticas_temporales": {
+                    "primera_comercializacion": resultado.primera_comercializacion.isoformat() if resultado.primera_comercializacion else None,
+                    "ultima_comercializacion": resultado.ultima_comercializacion.isoformat() if resultado.ultima_comercializacion else None,
+                    "dias_desde_ultima": dias_desde_ultima,
+                    "periodo_actividad_dias": (resultado.ultima_comercializacion - resultado.primera_comercializacion).days if resultado.primera_comercializacion and resultado.ultima_comercializacion else 0
+                },
+                "clasificacion_cliente": {
+                    "tipo_predominante": "SENCE" if comercializaciones_sence > comercializaciones_comerciales else "COMERCIAL",
+                    "nivel_actividad": (
+                        "ALTO" if resultado.total_comercializaciones >= 10 else
+                        "MEDIO" if resultado.total_comercializaciones >= 5 else
+                        "BAJO"
+                    ),
+                    "recencia": (
+                        "ACTIVO" if dias_desde_ultima is not None and dias_desde_ultima <= 90 else
+                        "INACTIVO_RECIENTE" if dias_desde_ultima is not None and dias_desde_ultima <= 365 else
+                        "INACTIVO" if dias_desde_ultima is not None else
+                        "SIN_DATOS"
+                    )
+                }
+            }
+            
+            clientes_completos.append(cliente_data)
+        
+        # Calcular estadísticas generales
+        if clientes_completos:
+            total_comercializaciones_global = sum(c["estadisticas_comercializaciones"]["total_comercializaciones"] for c in clientes_completos)
+            total_valor_global = sum(c["estadisticas_financieras"]["valor_total"] for c in clientes_completos)
+            total_sence_global = sum(c["estadisticas_comercializaciones"]["comercializaciones_sence"] for c in clientes_completos)
+            
+            estadisticas_globales = {
+                "total_clientes": len(clientes_completos),
+                "total_comercializaciones_global": total_comercializaciones_global,
+                "total_valor_global": round(total_valor_global, 2),
+                "promedio_comercializaciones_por_cliente": round(total_comercializaciones_global / len(clientes_completos), 2),
+                "promedio_valor_por_cliente": round(total_valor_global / len(clientes_completos), 2),
+                "promedio_valor_por_comercializacion": round(total_valor_global / total_comercializaciones_global, 2) if total_comercializaciones_global > 0 else 0,
+                "porcentaje_sence_global": round((total_sence_global / total_comercializaciones_global) * 100, 1) if total_comercializaciones_global > 0 else 0,
+                "distribucion_actividad": {
+                    "ALTO": len([c for c in clientes_completos if c["clasificacion_cliente"]["nivel_actividad"] == "ALTO"]),
+                    "MEDIO": len([c for c in clientes_completos if c["clasificacion_cliente"]["nivel_actividad"] == "MEDIO"]),
+                    "BAJO": len([c for c in clientes_completos if c["clasificacion_cliente"]["nivel_actividad"] == "BAJO"])
+                },
+                "distribucion_tipo": {
+                    "SENCE": len([c for c in clientes_completos if c["clasificacion_cliente"]["tipo_predominante"] == "SENCE"]),
+                    "COMERCIAL": len([c for c in clientes_completos if c["clasificacion_cliente"]["tipo_predominante"] == "COMERCIAL"])
+                },
+                "distribucion_recencia": {
+                    "ACTIVO": len([c for c in clientes_completos if c["clasificacion_cliente"]["recencia"] == "ACTIVO"]),
+                    "INACTIVO_RECIENTE": len([c for c in clientes_completos if c["clasificacion_cliente"]["recencia"] == "INACTIVO_RECIENTE"]),
+                    "INACTIVO": len([c for c in clientes_completos if c["clasificacion_cliente"]["recencia"] == "INACTIVO"])
+                }
+            }
+        else:
+            estadisticas_globales = {"mensaje": "No se encontraron clientes"}
+        
+        # Top 10 clientes con más comercializaciones
+        top_10_comercializaciones = sorted(
+            clientes_completos,
+            key=lambda x: x["estadisticas_comercializaciones"]["total_comercializaciones"],
+            reverse=True
+        )[:10]
+        
+        # Top 10 clientes con mayor valor
+        top_10_valor = sorted(
+            clientes_completos,
+            key=lambda x: x["estadisticas_financieras"]["valor_total"],
+            reverse=True
+        )[:10]
+        
+        # Respuesta final
+        response_data = {
+            "clientes": clientes_completos,
+            "estadisticas_globales": estadisticas_globales,
+            "top_rankings": {
+                "top_10_mas_comercializaciones": [
+                    {
+                        "cliente_id": c["cliente_id"],
+                        "cliente_nombre": c["cliente_nombre"],
+                        "total_comercializaciones": c["estadisticas_comercializaciones"]["total_comercializaciones"],
+                        "tipo_predominante": c["clasificacion_cliente"]["tipo_predominante"]
+                    }
+                    for c in top_10_comercializaciones
+                ],
+                "top_10_mayor_valor": [
+                    {
+                        "cliente_id": c["cliente_id"],
+                        "cliente_nombre": c["cliente_nombre"],
+                        "valor_total": c["estadisticas_financieras"]["valor_total"],
+                        "total_comercializaciones": c["estadisticas_comercializaciones"]["total_comercializaciones"]
+                    }
+                    for c in top_10_valor
+                ]
+            },
+            "configuracion_consulta": {
+                "limite_aplicado": limite,
+                "ordenar_por": ordenar_por,
+                "orden": orden,
+                "filtros_aplicados": ["ADI%", "OTR%", "SPD%"]
+            },
+            "fecha_consulta": datetime.now().isoformat()
         }
-        for r in resultados if r[0] and r[1]
-    ]
-
-    return {
-        "top_50_clientes": top_clientes,
-        "total": len(top_clientes)
-    }
+        
+        logger.info(f"Consulta exitosa: {len(clientes_completos)} clientes procesados, {total_comercializaciones_global} comercializaciones totales")
+        return response_data
+        
+    except Exception as e:
+        logger.error(f"Error en endpoint clientes/top: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
@@ -1365,42 +1541,30 @@ def calcular_proyeccion_anual_simplificada(
                     
                     for cliente_id, cliente_nombre in clientes_activos:
                         try:
-                            # Valor promedio histórico del cliente
+                            # Valor promedio histórico
                             ventas_historicas = db.query(models.Comercializacion.ValorVenta).filter(
                                 models.Comercializacion.ClienteId == cliente_id,
-                                models.Comercializacion.ValorVenta.isnot(None),
-                                ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
-                                ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
-                                ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+                                models.Comercializacion.ValorVenta.isnot(None)
                             ).all()
                             
                             if ventas_historicas:
                                 valor_promedio = sum(v[0] for v in ventas_historicas if v[0]) / len(ventas_historicas)
                                 
-                                # Determinar si es cliente SENCE
-                                sence_info = db.query(models.Comercializacion.EsSENCE).filter(
-                                    models.Comercializacion.ClienteId == cliente_id,
-                                    ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
-                                    ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
-                                    ~models.Comercializacion.CodigoCotizacion.like('SPD%')
-                                ).first()
-                                es_sence = bool(sence_info[0]) if sence_info else False
-                                
-                                # Datos para predicción con el mes específico
-                                datos_prediccion = {
+                                # Predicción
+                                datos_pred = {
                                     "cliente": cliente_nombre,
-                                    "correo_creador": "prediccion@insecap.cl",
+                                    "correo_creador": "sistema@insecap.cl",
                                     "valor_venta": valor_promedio,
-                                    "es_sence": es_sence,
-                                    "mes_facturacion": mes,  # Mes específico
+                                    "es_sence": False,  # Simplificado
+                                    "mes_facturacion": mes,
                                     "cantidad_facturas": 1
                                 }
                                 
-                                pred_result = modelo_ml.predecir_dias_pago(datos_prediccion)
+                                pred_result = modelo_ml.predecir_dias_pago(datos_pred)
                                 if pred_result.get("dias_predichos", 99) <= 31:
                                     valor_prediccion_mes += valor_promedio
                                     cantidad_predicciones += 1
-                                    
+                            
                         except Exception:
                             continue  # Saltar errores individuales
                     
@@ -1802,7 +1966,7 @@ def predecir_dias_pago_todos_clientes(
                 "clientes_predicciones": [],
                 "resumen": {
                     "total_procesados": 0,
-                    "exitosos": 0,
+                    "exitosas": 0,
                     "errores": 0
                 },
                 "paginacion": {
@@ -1812,6 +1976,8 @@ def predecir_dias_pago_todos_clientes(
                 },
                 "timestamp": datetime.now().isoformat()
             }
+        
+        logger.info(f"Encontrados {len(clientes_unicos)} clientes únicos")
         
         # 2. PROCESAR PREDICCIONES PARA CADA CLIENTE
         predicciones_resultado = []
@@ -1876,19 +2042,9 @@ def predecir_dias_pago_todos_clientes(
                         "tipo": "SENCE" if es_cliente_sence else "COMERCIAL",
                         "valor_promedio": round(valor_promedio, 2),
                         "total_comercializaciones": total_comercializaciones,
-                        "porcentaje_sence": round((comercializaciones_sence / total_comercializaciones) * 100, 1)
+                        "porcentaje_sence": round((comercializaciones_sence / total_comercializaciones) * 100, 1) if total_comercializaciones > 0 else 0
                     }
                 }
-                
-                # Agregar detalles adicionales si se solicitan
-                if incluir_detalles:
-                    cliente_prediccion["detalles"] = {
-                        "descripcion_riesgo": resultado_prediccion["descripcion_riesgo"],
-                        "accion_recomendada": resultado_prediccion["accion_recomendada"],
-                        "explicacion_mes": resultado_prediccion["explicacion_mes"],
-                        "comercializaciones_historicas": len(comercializaciones_cliente),
-                        "ultima_comercializacion": max(c.FechaInicio for c in comercializaciones_cliente if c.FechaInicio).isoformat() if comercializaciones_cliente else None
-                    }
                 
                 predicciones_resultado.append(cliente_prediccion)
                 exitosos_count += 1
@@ -1927,7 +2083,7 @@ def predecir_dias_pago_todos_clientes(
                     "dias_promedio_predicho": round(dias_promedio, 2),
                     "distribucion_riesgo": distribucion_riesgo,
                     "clientes_pagan_este_mes": pagan_este_mes,
-                    "porcentaje_pagan_mes": round((pagan_este_mes / len(predicciones_validas)) * 100, 2),
+                    "porcentaje_pagan_mes": round((pagan_este_mes / len(predicciones_validas)) * 100, 2) if clientes_unicos else 0,
                     "confianza_promedio": round(sum(p["prediccion"]["confianza"] for p in predicciones_validas) / len(predicciones_validas), 3)
                 }
             else:
@@ -1944,7 +2100,7 @@ def predecir_dias_pago_todos_clientes(
             "clientes_predicciones": predicciones_resultado,
             "resumen": {
                 "total_procesados": len(clientes_unicos),
-                "exitosos": exitosos_count,
+                "exitosas": exitosos_count,
                 "errores": errores_count,
                 "tasa_exito": round((exitosos_count / len(clientes_unicos)) * 100, 2) if clientes_unicos else 0
             },
@@ -2106,7 +2262,7 @@ def predecir_todos_clientes_resumen(
 @app.get("/clientes/estadisticas")
 def obtener_clientes_con_estadisticas(db: Session = Depends(get_db)):
     """
-    🔍 ENDPOINT: Clientes con Estadísticas de Ventas
+    ENDPOINT: Clientes con Estadísticas de Ventas
     
     Devuelve todos los clientes únicos con sus estadísticas de ventas:
     - Total de ventas (comercializaciones)
@@ -2116,7 +2272,7 @@ def obtener_clientes_con_estadisticas(db: Session = Depends(get_db)):
     Filtros aplicados: Excluye ADI, OTR, SPD
     """
     try:
-        logger.info("🔍 Iniciando consulta de clientes con estadísticas...")
+        logger.info("Iniciando consulta de clientes con estadísticas...")
         
         # Query principal: obtener todas las comercializaciones válidas agrupadas por cliente
         query_result = db.query(
@@ -2139,7 +2295,7 @@ def obtener_clientes_con_estadisticas(db: Session = Depends(get_db)):
             models.Comercializacion.Cliente
         ).all()
         
-        logger.info(f"📊 Consulta completada: {len(query_result)} clientes encontrados")
+        logger.info(f"Consulta completada: {len(query_result)} clientes encontrados")
         
         # Procesar resultados
         clientes_estadisticas = []
@@ -2153,7 +2309,7 @@ def obtener_clientes_con_estadisticas(db: Session = Depends(get_db)):
             }
             clientes_estadisticas.append(cliente_data)
         
-        logger.info(f"✅ Procesamiento completado: {len(clientes_estadisticas)} clientes procesados")
+        logger.info(f"Procesamiento completado: {len(clientes_estadisticas)} clientes procesados")
         
         # Respuesta final
         response_data = {
@@ -2161,9 +2317,1020 @@ def obtener_clientes_con_estadisticas(db: Session = Depends(get_db)):
             "total_clientes": len(clientes_estadisticas)
         }
         
-        logger.info(f"🎯 Endpoint exitoso: {response_data['total_clientes']} clientes devueltos")
+        logger.info(f"Endpoint exitoso: {response_data['total_clientes']} clientes devueltos")
         return response_data
         
     except Exception as e:
-        logger.error(f"❌ Error en endpoint clientes/estadisticas: {e}")
+        logger.error(f"Error en endpoint clientes/estadisticas: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+
+@app.get("/cliente/{cliente_id}/vendedores")
+def obtener_vendedores_por_cliente(cliente_id: int, db: Session = Depends(get_db)):
+    """
+    ENDPOINT: Vendedores por Cliente
+    
+    Devuelve todos los vendedores/líderes comerciales que han trabajado
+    con un cliente específico y el total vendido por cada uno.
+    
+    Args:
+        cliente_id: ID del cliente
+    
+    Returns:
+        Lista de vendedores con sus totales de venta a este cliente
+    """
+    try:
+        logger.info(f"Consultando vendedores para cliente ID: {cliente_id}")
+        
+        # Verificar que el cliente existe
+        cliente_existe = db.query(models.Comercializacion).filter(
+            models.Comercializacion.ClienteId == cliente_id,
+            models.Comercializacion.Cliente.isnot(None),
+            ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+            ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+            ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+        ).first()
+        
+        if not cliente_existe:
+            raise HTTPException(status_code=404, detail=f"Cliente con ID {cliente_id} no encontrado")
+        
+        # Query principal: obtener vendedores y sus totales por cliente
+        query_result = db.query(
+            models.Comercializacion.LiderComercial,
+            models.Comercializacion.Cliente,
+            func.count(models.Comercializacion.id).label("total_ventas"),
+            func.sum(models.Comercializacion.ValorVenta).label("valor_total_vendido"),
+            func.avg(models.Comercializacion.ValorVenta).label("valor_promedio"),
+            func.sum(models.Comercializacion.EsSENCE).label("ventas_sence"),
+            func.min(models.Comercializacion.FechaInicio).label("primera_venta"),
+            func.max(models.Comercializacion.FechaInicio).label("ultima_venta")
+        ).filter(
+            models.Comercializacion.ClienteId == cliente_id,
+            models.Comercializacion.LiderComercial.isnot(None),
+            models.Comercializacion.ValorVenta.isnot(None),
+            # Filtros estándar de exclusión
+            ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+            ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+            ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+        ).group_by(
+            models.Comercializacion.LiderComercial,
+            models.Comercializacion.Cliente
+        ).order_by(
+            func.sum(models.Comercializacion.ValorVenta).desc()
+        ).all()
+        
+        if not query_result:
+            return {
+                "cliente_id": cliente_id,
+                "cliente_nombre": cliente_existe.Cliente,
+                "vendedores": [],
+                "resumen": {
+                    "total_vendedores": 0,
+                    "valor_total_cliente": 0,
+                    "mensaje": "No se encontraron vendedores con ventas válidas para este cliente"
+                }
+            }
+        
+        logger.info(f"Encontrados {len(query_result)} vendedores para cliente {cliente_id}")
+        
+        # Procesar resultados
+        vendedores_data = []
+        valor_total_cliente = 0
+        
+        for resultado in query_result:
+            vendedor_info = {
+                "lider_comercial": resultado.LiderComercial,
+                "total_ventas": resultado.total_ventas,
+                "valor_total_vendido": float(resultado.valor_total_vendido) if resultado.valor_total_vendido else 0,
+                "valor_promedio_venta": float(resultado.valor_promedio) if resultado.valor_promedio else 0,
+                "ventas_sence": int(resultado.ventas_sence) if resultado.ventas_sence else 0,
+                "ventas_comerciales": resultado.total_ventas - (int(resultado.ventas_sence) if resultado.ventas_sence else 0),
+                "primera_venta": resultado.primera_venta.isoformat() if resultado.primera_venta else None,
+                "ultima_venta": resultado.ultima_venta.isoformat() if resultado.ultima_venta else None,
+                "porcentaje_sence": round((int(resultado.ventas_sence or 0) / resultado.total_ventas) * 100, 1) if resultado.total_ventas > 0 else 0
+            }
+            
+            vendedores_data.append(vendedor_info)
+            valor_total_cliente += vendedor_info["valor_total_vendido"]
+        
+        # Calcular porcentajes de participación por vendedor
+        for vendedor in vendedores_data:
+            if valor_total_cliente > 0:
+                vendedor["porcentaje_participacion"] = round((vendedor["valor_total_vendido"] / valor_total_cliente) * 100, 2)
+            else:
+                vendedor["porcentaje_participacion"] = 0
+        
+        # Estadísticas del cliente
+        resumen_cliente = {
+            "total_vendedores": len(vendedores_data),
+            "valor_total_cliente": valor_total_cliente,
+            "vendedor_principal": vendedores_data[0]["lider_comercial"] if vendedores_data else None,
+            "valor_vendedor_principal": vendedores_data[0]["valor_total_vendido"] if vendedores_data else 0,
+            "total_ventas_cliente": sum(v["total_ventas"] for v in vendedores_data),
+            "total_ventas_sence": sum(v["ventas_sence"] for v in vendedores_data),
+            "total_ventas_comerciales": sum(v["ventas_comerciales"] for v in vendedores_data)
+        }
+        
+        # Respuesta final
+        response_data = {
+            "cliente_id": cliente_id,
+            "cliente_nombre": query_result[0].Cliente,
+            "vendedores": vendedores_data,
+            "resumen": resumen_cliente,
+            "fecha_consulta": datetime.now().isoformat()
+        }
+        
+        logger.info(f"Consulta exitosa: {len(vendedores_data)} vendedores, valor total: ${valor_total_cliente:,.0f}")
+        return response_data
+        
+    except HTTPException:
+        raise  # Re-lanzar HTTPExceptions
+    except Exception as e:
+        logger.error(f"Error en endpoint cliente/{cliente_id}/vendedores: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+
+@app.get("/clientes/con_vendedores")
+def obtener_todos_clientes_con_vendedores(
+    limite: int = 560,
+    incluir_sin_vendedores: bool = True,
+    db: Session = Depends(get_db)
+):
+    """
+    ENDPOINT: Todos los Clientes con sus Vendedores
+    
+    Devuelve TODOS los clientes y para cada cliente automáticamente
+    incluye la información completa de todos sus vendedores.
+    
+    Args:
+        limite: Máximo número de clientes a procesar (máximo 500)
+        incluir_sin_vendedores: Si incluir clientes que no tienen vendedores válidos
+    
+    Returns:
+        Lista completa de clientes con información detallada de sus vendedores
+    """
+    try:
+        limite = min(max(limite, 10), 500)  # Entre 10 y 500
+        
+        logger.info(f"Consultando todos los clientes con sus vendedores (límite: {limite})...")
+        
+        # 1. OBTENER TODOS LOS CLIENTES ÚNICOS
+        clientes_unicos = db.query(
+            models.Comercializacion.ClienteId,
+            models.Comercializacion.Cliente
+        ).filter(
+            models.Comercializacion.Cliente.isnot(None),
+            models.Comercializacion.ClienteId.isnot(None),
+            ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+            ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+            ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+        ).distinct().limit(limite).all()
+        
+        if not clientes_unicos:
+            return {
+                "clientes_con_vendedores": [],
+                "resumen": {
+                    "total_clientes": 0,
+                    "clientes_con_vendedores": 0,
+                    "clientes_sin_vendedores": 0,
+                    "mensaje": "No se encontraron clientes válidos"
+                }
+            }
+        
+        logger.info(f"Encontrados {len(clientes_unicos)} clientes únicos")
+        
+        # 2. PROCESAR CADA CLIENTE Y SUS VENDEDORES
+        clientes_con_vendedores = []
+        clientes_con_vendedores_count = 0
+        clientes_sin_vendedores_count = 0
+        
+        for cliente_id, cliente_nombre in clientes_unicos:
+            try:
+                # Query para obtener vendedores del cliente actual
+                vendedores_query = db.query(
+                    models.Comercializacion.LiderComercial,
+                    func.count(models.Comercializacion.id).label("total_ventas"),
+                    func.sum(models.Comercializacion.ValorVenta).label("valor_total_vendido"),
+                    func.avg(models.Comercializacion.ValorVenta).label("valor_promedio"),
+                    func.sum(models.Comercializacion.EsSENCE).label("ventas_sence"),
+                    func.min(models.Comercializacion.FechaInicio).label("primera_venta"),
+                    func.max(models.Comercializacion.FechaInicio).label("ultima_venta")
+                ).filter(
+                    models.Comercializacion.ClienteId == cliente_id,
+                    models.Comercializacion.LiderComercial.isnot(None),
+                    models.Comercializacion.ValorVenta.isnot(None),
+                    ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+                    ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+                    ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+                ).group_by(
+                    models.Comercializacion.LiderComercial
+                ).order_by(
+                    func.sum(models.Comercializacion.ValorVenta).desc()
+                ).all()
+                
+                # Procesar vendedores del cliente
+                vendedores_data = []
+                valor_total_cliente = 0
+                
+                for vendedor_result in vendedores_query:
+                    vendedor_info = {
+                        "lider_comercial": vendedor_result.LiderComercial,
+                        "total_ventas": vendedor_result.total_ventas,
+                        "valor_total_vendido": float(vendedor_result.valor_total_vendido) if vendedor_result.valor_total_vendido else 0,
+                        "valor_promedio_venta": float(vendedor_result.valor_promedio) if vendedor_result.valor_promedio else 0,
+                        "ventas_sence": int(vendedor_result.ventas_sence) if vendedor_result.ventas_sence else 0,
+                        "ventas_comerciales": vendedor_result.total_ventas - (int(vendedor_result.ventas_sence) if vendedor_result.ventas_sence else 0),
+                        "primera_venta": vendedor_result.primera_venta.isoformat() if vendedor_result.primera_venta else None,
+                        "ultima_venta": vendedor_result.ultima_venta.isoformat() if vendedor_result.ultima_venta else None,
+                        "porcentaje_sence": round((int(vendedor_result.ventas_sence or 0) / vendedor_result.total_ventas) * 100, 1) if vendedor_result.total_ventas > 0 else 0
+                    }
+                    
+                    vendedores_data.append(vendedor_info)
+                    valor_total_cliente += vendedor_info["valor_total_vendido"]
+                
+                # Calcular porcentajes de participación por vendedor
+                for vendedor in vendedores_data:
+                    if valor_total_cliente > 0:
+                        vendedor["porcentaje_participacion"] = round((vendedor["valor_total_vendido"] / valor_total_cliente) * 100, 2)
+                    else:
+                        vendedor["porcentaje_participacion"] = 0
+                
+                # Estadísticas del cliente
+                resumen_cliente = {
+                    "total_vendedores": len(vendedores_data),
+                    "valor_total_cliente": valor_total_cliente,
+                    "vendedor_principal": vendedores_data[0]["lider_comercial"] if vendedores_data else None,
+                    "valor_vendedor_principal": vendedores_data[0]["valor_total_vendido"] if vendedores_data else 0,
+                    "total_ventas_cliente": sum(v["total_ventas"] for v in vendedores_data),
+                    "total_ventas_sence": sum(v["ventas_sence"] for v in vendedores_data),
+                    "total_ventas_comerciales": sum(v["ventas_comerciales"] for v in vendedores_data)
+                }
+                
+                # Respuesta final
+                response_data = {
+                    "cliente_id": cliente_id,
+                    "cliente_nombre": query_result[0].Cliente,
+                    "vendedores": vendedores_data,
+                    "resumen": resumen_cliente,
+                    "fecha_consulta": datetime.now().isoformat()
+                }
+                
+                logger.info(f"Consulta exitosa: {len(vendedores_data)} vendedores, valor total: ${valor_total_cliente:,.0f}")
+                clientes_con_vendedores.append(response_data)
+                clientes_con_vendedores_count += 1
+                
+            except Exception as e:
+                logger.warning(f"Error procesando cliente {cliente_id}: {e}")
+                clientes_sin_vendedores_count += 1
+                
+                # Agregar cliente con error si se incluyen clientes sin vendedores
+                if incluir_sin_vendedores:
+                    clientes_con_vendedores.append({
+                        "cliente_id": cliente_id,
+                        "cliente_nombre": cliente_nombre,
+                        "vendedores": [],
+                        "resumen_cliente": {
+                            "total_vendedores": 0,
+                            "valor_total_cliente": 0,
+                            "error": str(e)
+                        },
+                        "tiene_vendedores": False,
+                        "error": str(e)
+                    })
+        
+        # 3. CALCULAR ESTADÍSTICAS GENERALES
+        valor_total_general = sum(
+            cliente["resumen_cliente"]["valor_total_cliente"] 
+            for cliente in clientes_con_vendedores 
+            if "valor_total_cliente" in cliente["resumen_cliente"]
+        )
+        
+        total_ventas_general = sum(
+            cliente["resumen_cliente"]["total_ventas_cliente"] 
+            for cliente in clientes_con_vendedores 
+            if "total_ventas_cliente" in cliente["resumen_cliente"]
+        )
+        
+        total_ventas_sence_general = sum(
+            cliente["resumen_cliente"]["total_ventas_sence"] 
+            for cliente in clientes_con_vendedores 
+            if "total_ventas_sence" in cliente["resumen_cliente"]
+        )
+        
+        # Obtener top 5 clientes por valor
+        clientes_ordenados = sorted(
+            [c for c in clientes_con_vendedores if c["tiene_vendedores"]], 
+            key=lambda x: x["resumen_cliente"]["valor_total_cliente"], 
+            reverse=True
+        )
+        top_5_clientes = clientes_ordenados[:5]
+        
+        # Obtener todos los vendedores únicos
+        vendedores_unicos = set()
+        for cliente in clientes_con_vendedores:
+            for vendedor in cliente["vendedores"]:
+                vendedores_unicos.add(vendedor["lider_comercial"])
+        
+        # 4. RESPUESTA FINAL
+        response_data = {
+            "clientes_con_vendedores": clientes_con_vendedores,
+            "resumen_general": {
+                "total_clientes_procesados": len(clientes_unicos),
+                "clientes_con_vendedores": clientes_con_vendedores_count,
+                "clientes_sin_vendedores": clientes_sin_vendedores_count,
+                "total_pendientes_global": total_pendientes_global,
+                "promedio_pendientes_por_cliente": round(total_pendientes_global / clientes_con_vendedores_count, 2) if clientes_con_vendedores_count > 0 else 0,
+                "clientes_con_pendientes": len([c for c in clientes_con_vendedores if c["comercializaciones_pendientes"]["cantidad"] > 0]),
+                "clientes_sin_pendientes": len([c for c in clientes_con_vendedores if c["comercializaciones_pendientes"]["cantidad"] == 0])
+            },
+            "top_5_clientes_mas_pendientes": [
+                {
+                    "cliente_id": c["cliente_id"],
+                    "cliente_nombre": c["cliente_nombre"],
+                    "cantidad_pendientes": c["comercializaciones_pendientes"]["cantidad"],
+                    "valor_total_pendiente": c["comercializaciones_pendientes"]["valor_total_pendiente"],
+                    "ultima_comercializacion_fecha": c["ultima_comercializacion"]["fecha"]
+                }
+                for c in top_10_pendientes
+            ],
+            "top_10_clientes_mas_antiguos": [
+                {
+                    "cliente_id": c["cliente_id"],
+                    "cliente_nombre": c["cliente_nombre"],
+                    "dias_desde_ultima": c["resumen_cliente"]["dias_desde_ultima_comercializacion"],
+                    "ultima_comercializacion_fecha": c["ultima_comercializacion"]["fecha"],
+                    "pendientes": c["comercializaciones_pendientes"]["cantidad"]
+                }
+                for c in clientes_mas_antiguos
+            ],
+            "configuracion": {
+                "limite_procesado": limite,
+                "incluir_sin_vendedores": incluir_sin_vendedores,
+                "solo_activos_recientes": solo_activos_recientes,
+                "filtros_aplicados": ["ADI%", "OTR%", "SPD%"],
+                "criterio_pendiente": "Comercializaciones sin estado = 1 (terminada)"
+            },
+            "fecha_consulta": datetime.now().isoformat()
+        }
+        
+        logger.info(f"Consulta exitosa: {total_clientes_con_comercializaciones} clientes con comercializaciones, {total_pendientes_global} pendientes totales")
+        return response_data
+        
+    except Exception as e:
+        logger.error(f"Error en endpoint clientes/con_vendedores: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+
+@app.get("/clientes/con_confiabilidad")
+def obtener_clientes_con_confiabilidad(
+    limite: int = 100,
+    solo_con_prediccion: bool = True,
+    incluir_detalles: bool = False,
+    db: Session = Depends(get_db)
+):
+    """
+    ENDPOINT: Clientes con Confiabilidad
+    
+    Devuelve todos los clientes junto con su nivel de confiabilidad
+    basado en las predicciones del modelo ML.
+    
+    Args:
+        limite: Máximo número de clientes a procesar (máximo 500)
+        solo_con_prediccion: Si true, solo incluye clientes con predicción válida
+        incluir_detalles: Si incluir información detallada de predicción
+    
+    Returns:
+        Lista de clientes con su confiabilidad y métricas asociadas
+    """
+    try:
+        if not modelo_ml.esta_disponible():
+            raise HTTPException(status_code=503, detail="Modelo de ML no disponible")
+        
+        limite = min(max(limite, 10), 500)  # Entre 10 y 500
+        
+        logger.info(f"Consultando clientes con confiabilidad (límite: {limite})...")
+        
+        # 1. OBTENER TODOS LOS CLIENTES ÚNICOS
+        clientes_unicos = db.query(
+            models.Comercializacion.ClienteId,
+            models.Comercializacion.Cliente
+        ).filter(
+            models.Comercializacion.Cliente.isnot(None),
+            models.Comercializacion.ClienteId.isnot(None),
+            ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+            ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+            ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+        ).distinct().limit(limite).all()
+        
+        if not clientes_unicos:
+            return {
+                "clientes_con_confiabilidad": [],
+                "resumen": {
+                    "total_clientes": 0,
+                    "clientes_con_prediccion": 0,
+                    "confiabilidad_promedio": 0,
+                    "mensaje": "No se encontraron clientes válidos"
+                }
+            }
+        
+        logger.info(f"Procesando {len(clientes_unicos)} clientes únicos...")
+        
+        # 2. PROCESAR CADA CLIENTE Y CALCULAR CONFIABILIDAD
+        clientes_con_confiabilidad = []
+        total_predicciones_exitosas = 0
+        suma_confiabilidad = 0
+        
+        for cliente_id, cliente_nombre in clientes_unicos:
+            try:
+                # Obtener estadísticas históricas del cliente para predicción
+                comercializaciones_cliente = db.query(models.Comercializacion).filter(
+                    models.Comercializacion.ClienteId == cliente_id,
+                    models.Comercializacion.ValorVenta.isnot(None),
+                    ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+                    ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+                    ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+                ).all()
+                
+                if not comercializaciones_cliente:
+                    if not solo_con_prediccion:
+                        clientes_con_confiabilidad.append({
+                            "cliente_id": cliente_id,
+                            "cliente_nombre": cliente_nombre,
+                            "confiabilidad": None,
+                            "nivel_confianza": "SIN_DATOS",
+                            "prediccion_disponible": False,
+                            "motivo": "No hay comercializaciones válidas para predicción"
+                        })
+                    continue
+                
+                # Calcular datos para predicción
+                valores_venta = [c.ValorVenta for c in comercializaciones_cliente if c.ValorVenta and c.ValorVenta > 0]
+                valor_promedio = sum(valores_venta) / len(valores_venta) if valores_venta else 500000
+                
+                # Determinar tipo de cliente (SENCE vs COMERCIAL)
+                total_comercializaciones = len(comercializaciones_cliente)
+                comercializaciones_sence = sum(1 for c in comercializaciones_cliente if c.EsSENCE)
+                es_cliente_sence = comercializaciones_sence > (total_comercializaciones / 2)
+                
+                # Calcular cantidad de facturas típica
+                if valor_promedio <= 200000:
+                    cantidad_facturas = 1
+                elif valor_promedio <= 500000:
+                    cantidad_facturas = 2
+                else:
+                    cantidad_facturas = 3
+                
+                # Preparar datos para predicción
+                datos_prediccion = {
+                    "cliente": cliente_nombre,
+                    "correo_creador": "sence@insecap.cl" if es_cliente_sence else "comercial@insecap.cl",
+                    "valor_venta": valor_promedio,
+                    "es_sence": es_cliente_sence,
+                    "mes_facturacion": datetime.now().month,
+                    "cantidad_facturas": cantidad_facturas
+                }
+                
+                # Realizar predicción para obtener confiabilidad
+                resultado_prediccion = modelo_ml.predecir_dias_pago(datos_prediccion)
+                confiabilidad = resultado_prediccion.get("confianza", 0)
+                
+                # Clasificar nivel de confianza
+                if confiabilidad >= 0.9:
+                    nivel_confianza = "MUY_ALTA"
+                elif confiabilidad >= 0.8:
+                    nivel_confianza = "ALTA"
+                elif confiabilidad >= 0.7:
+                    nivel_confianza = "MEDIA"
+                elif confiabilidad >= 0.6:
+                    nivel_confianza = "BAJA"
+                else:
+                    nivel_confianza = "MUY_BAJA"
+                
+                # Crear objeto cliente con confiabilidad
+                cliente_data = {
+                    "cliente_id": cliente_id,
+                    "cliente_nombre": cliente_nombre,
+                    "confiabilidad": round(confiabilidad, 4),
+                    "nivel_confianza": nivel_confianza,
+                    "prediccion_disponible": True,
+                    "perfil_cliente": {
+                        "tipo": "SENCE" if es_cliente_sence else "COMERCIAL",
+                        "valor_promedio": round(valor_promedio, 2),
+                        "total_comercializaciones": total_comercializaciones,
+                        "porcentaje_sence": round((comercializaciones_sence / total_comercializaciones) * 100, 1) if total_comercializaciones > 0 else 0
+                    }
+                }
+                
+                # Agregar detalles de predicción si se solicitan
+                if incluir_detalles:
+                    cliente_data["detalles_prediccion"] = {
+                        "dias_predichos": resultado_prediccion["dias_predichos"],
+                        "nivel_riesgo": resultado_prediccion["codigo_riesgo"],
+                        "descripcion_riesgo": resultado_prediccion["descripcion_riesgo"],
+                        "se_paga_este_mes": resultado_prediccion["se_paga_mismo_mes"],
+                        "accion_recomendada": resultado_prediccion["accion_recomendada"]
+                    }
+                    
+                    # Factores que afectan la confiabilidad
+                    factores_confiabilidad = []
+                    if total_comercializaciones >= 10:
+                        factores_confiabilidad.append("Historial amplio (+)")
+                    elif total_comercializaciones < 3:
+                        factores_confiabilidad.append("Historial limitado (-)")
+                    
+                    if len(set(v for v in valores_venta)) > 1:
+                        variabilidad = max(valores_venta) / min(valores_venta) if min(valores_venta) > 0 else 1
+                        if variabilidad > 3:
+                            factores_confiabilidad.append("Alta variabilidad en montos (-)")
+                        else:
+                            factores_confiabilidad.append("Montos consistentes (+)")
+                    
+                    if es_cliente_sence:
+                        factores_confiabilidad.append("Cliente SENCE (patrón predecible) (+)")
+                    
+                    cliente_data["detalles_prediccion"]["factores_confiabilidad"] = factores_confiabilidad
+                
+                clientes_con_confiabilidad.append(cliente_data)
+                total_predicciones_exitosas += 1
+                suma_confiabilidad += confiabilidad
+                
+            except Exception as e:
+                logger.warning(f"Error procesando cliente {cliente_id}: {e}")
+                errores_count += 1
+                
+                # Agregar registro de error si se incluyen detalles
+                if incluir_detalles:
+                    clientes_con_confiabilidad.append({
+                        "cliente_id": cliente_id,
+                        "cliente_nombre": cliente_nombre,
+                        "error": str(e),
+                        "procesado": False
+                    })
+        
+        # 3. CALCULAR ESTADÍSTICAS GENERALES
+        confiabilidad_promedio = suma_confiabilidad / total_predicciones_exitosas if total_predicciones_exitosas > 0 else 0
+        
+        # Distribución por nivel de confianza
+        distribucion_confianza = {}
+        for cliente in clientes_con_confiabilidad:
+            if cliente["prediccion_disponible"]:
+                nivel = cliente["nivel_confianza"]
+                distribucion_confianza[nivel] = distribucion_confianza.get(nivel, 0) + 1
+        
+        # Top 10 clientes más confiables
+        clientes_confiables = [
+            c for c in clientes_con_confiabilidad 
+            if c["prediccion_disponible"] and c["confiabilidad"] is not None
+        ]
+        top_10_confiables = sorted(
+            clientes_confiables, 
+            key=lambda x: x["confiabilidad"], 
+            reverse=True
+        )[:10]
+        
+        # Clientes con baja confiabilidad (requieren atención)
+        clientes_baja_confiabilidad = [
+            c for c in clientes_confiables 
+            if c["confiabilidad"] < 0.7
+        ]
+        
+        # 4. RESPUESTA FINAL
+        response_data = {
+            "clientes_con_confiabilidad": clientes_con_confiabilidad,
+            "resumen_confiabilidad": {
+                "total_clientes_procesados": len(clientes_unicos),
+                "clientes_con_prediccion": total_predicciones_exitosas,
+                "clientes_sin_prediccion": len(clientes_unicos) - total_predicciones_exitosas,
+                "confiabilidad_promedio": round(confiabilidad_promedio, 4),
+                "distribucion_niveles": distribucion_confianza,
+                "clientes_alta_confianza": len([c for c in clientes_confiables if c["confiabilidad"] >= 0.8]),
+                "clientes_baja_confianza": len(clientes_baja_confiabilidad),
+                "porcentaje_predicciones_exitosas": round((total_predicciones_exitosas / len(clientes_unicos)) * 100, 2) if clientes_unicos else 0
+            },
+            "top_10_mas_confiables": [
+                {
+                    "cliente_id": c["cliente_id"],
+                    "cliente_nombre": c["cliente_nombre"],
+                    "confiabilidad": c["confiabilidad"],
+                    "nivel_confianza": c["nivel_confianza"],
+                    "tipo_cliente": c["perfil_cliente"]["tipo"] if "perfil_cliente" in c else "N/A"
+                }
+                for c in top_10_confiables
+            ],
+            "clientes_requieren_atencion": [
+                {
+                    "cliente_id": c["cliente_id"],
+                    "cliente_nombre": c["cliente_nombre"],
+                    "confiabilidad": c["confiabilidad"],
+                    "nivel_confianza": c["nivel_confianza"],
+                    "motivo": "Confiabilidad < 70%"
+                }
+                for c in clientes_baja_confiabilidad[:5]  # Solo los 5 más críticos
+            ],
+            "configuracion": {
+                "limite_procesado": limite,
+                "solo_con_prediccion": solo_con_prediccion,
+                "incluir_detalles": incluir_detalles,
+                "modelo_version": "Híbrido Mejorado v3.0",
+                "filtros_aplicados": ["ADI%", "OTR%", "SPD%"]
+            },
+            "fecha_consulta": datetime.now().isoformat()
+        }
+        
+        logger.info(f"Consulta exitosa: {total_predicciones_exitosas}/{len(clientes_unicos)} clientes con predicción")
+        logger.info(f"Confiabilidad promedio: {confiabilidad_promedio:.3f}")
+        
+        return response_data
+        
+    except HTTPException:
+        raise  # Re-lanzar HTTPExceptions
+    except Exception as e:
+        logger.error(f"Error en endpoint clientes/con_confiabilidad: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+
+@app.get("/clientes/cotizaciones_y_comercializaciones_detalle")
+def obtener_clientes_cotizaciones_y_comercializaciones_detalle(
+    limite: int = 500,
+    incluir_sin_datos: bool = False,
+    solo_activos_recientes: bool = True,
+    db: Session = Depends(get_db)
+):
+    """
+    ENDPOINT: Clientes con Cotizaciones y Comercializaciones Detalladas
+    
+    Devuelve para todos los clientes:
+    - Todas sus cotizaciones con última fecha
+    - Todas sus comercializaciones pendientes (estado != 1) por cotización
+    - Información detallada de cada cotización y comercialización
+    
+    Args:
+        limite: Máximo número de clientes a procesar (máximo 1000)
+        incluir_sin_datos: Si incluir clientes sin cotizaciones/comercializaciones
+        solo_activos_recientes: Si filtrar solo clientes con actividad en últimos 3 años
+    
+    Returns:
+        Lista detallada de clientes con sus cotizaciones y comercializaciones pendientes
+    """
+    try:
+        limite = min(max(limite, 10), 1000)  # Entre 10 y 1000
+        
+        logger.info(f"Consultando clientes con cotizaciones y comercializaciones detalladas (límite: {limite})...")
+        
+        # 1. OBTENER TODOS LOS CLIENTES ÚNICOS
+        query_clientes = db.query(
+            models.Comercializacion.ClienteId,
+            models.Comercializacion.Cliente
+        ).filter(
+            models.Comercializacion.Cliente.isnot(None),
+            models.Comercializacion.ClienteId.isnot(None),
+            # Filtros estándar de exclusión
+            ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+            ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+            ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+        )
+        
+        # Filtro adicional para clientes activos recientes
+        if solo_activos_recientes:
+            fecha_limite = datetime.now().replace(year=datetime.now().year - 3)
+            query_clientes = query_clientes.filter(
+                models.Comercializacion.FechaInicio >= fecha_limite
+            )
+        
+        clientes_unicos = query_clientes.distinct().limit(limite).all()
+        
+        if not clientes_unicos:
+            return {
+                "clientes_detalle": [],
+                "resumen": {
+                    "total_clientes": 0,
+                    "clientes_con_datos": 0,
+                    "clientes_sin_datos": 0,
+                    "total_cotizaciones": 0,
+                    "total_comercializaciones_pendientes": 0,
+                    "mensaje": "No se encontraron clientes válidos"
+                },
+                "fecha_consulta": datetime.now().isoformat()
+            }
+        
+        logger.info(f"Procesando {len(clientes_unicos)} clientes únicos...")
+        
+        # 2. PROCESAR CADA CLIENTE CON DETALLE COMPLETO
+        clientes_detalle = []
+        total_clientes_con_datos = 0
+        total_clientes_sin_datos = 0
+        total_cotizaciones_global = 0
+        total_comercializaciones_pendientes_global = 0
+        
+        for cliente_id, cliente_nombre in clientes_unicos:
+            try:
+                # Obtener TODAS las comercializaciones del cliente agrupadas por código de cotización
+                comercializaciones_cliente = db.query(models.Comercializacion).filter(
+                    models.Comercializacion.ClienteId == cliente_id,
+                    ~models.Comercializacion.CodigoCotizacion.like('ADI%'),
+                    ~models.Comercializacion.CodigoCotizacion.like('OTR%'),
+                    ~models.Comercializacion.CodigoCotizacion.like('SPD%')
+                ).order_by(
+                    models.Comercializacion.CodigoCotizacion,
+                    models.Comercializacion.FechaInicio.desc()
+                ).all()
+                
+                if not comercializaciones_cliente:
+                    if incluir_sin_datos:
+                        clientes_detalle.append({
+                            "cliente_id": cliente_id,
+                            "cliente_nombre": cliente_nombre,
+                            "cotizaciones": [],
+                            "resumen_cliente": {
+                                "total_cotizaciones": 0,
+                                "total_comercializaciones": 0,
+                                "comercializaciones_pendientes_total": 0,
+                                "tiene_datos": False,
+                                "mensaje": "Cliente sin cotizaciones/comercializaciones válidas"
+                            }
+                        })
+                        total_clientes_sin_datos += 1
+                    continue
+                
+                # 3. AGRUPAR COMERCIALIZACIONES POR CÓDIGO DE COTIZACIÓN
+                cotizaciones_dict = {}
+                for comercializacion in comercializaciones_cliente:
+                    codigo_cotizacion = comercializacion.CodigoCotizacion
+                    
+                    if codigo_cotizacion not in cotizaciones_dict:
+                        cotizaciones_dict[codigo_cotizacion] = {
+                            "codigo_cotizacion": codigo_cotizacion,
+                            "comercializaciones": [],
+                            "ultima_fecha": None,
+                            "comercializaciones_pendientes": [],
+                            "comercializaciones_terminadas": [],
+                            "valor_total_cotizacion": 0,
+                            "valor_pendiente_cotizacion": 0,
+                            "es_sence": None
+                        }
+                    
+                    cotizaciones_dict[codigo_cotizacion]["comercializaciones"].append(comercializacion)
+                
+                # 4. PROCESAR CADA COTIZACIÓN Y SUS COMERCIALIZACIONES
+                cotizaciones_detalle = []
+                
+                for codigo_cotizacion, cotizacion_data in cotizaciones_dict.items():
+                    comercializaciones = cotizacion_data["comercializaciones"]
+                    
+                    # Obtener la fecha más reciente de la cotización
+                    fechas_validas = [c.FechaInicio for c in comercializaciones if c.FechaInicio]
+                    ultima_fecha_cotizacion = max(fechas_validas) if fechas_validas else None
+                    
+                    # Determinar si es SENCE (mayoría de comercializaciones)
+                    sence_count = sum(1 for c in comercializaciones if c.EsSENCE)
+                    es_sence = sence_count > (len(comercializaciones) / 2)
+                    
+                    # Procesar cada comercialización de esta cotización
+                    comercializaciones_pendientes = []
+                    comercializaciones_terminadas = []
+                    valor_total = 0
+                    valor_pendiente = 0
+                    
+                    for comercializacion in comercializaciones:
+                        valor_comercializacion = float(comercializacion.ValorVenta) if comercializacion.ValorVenta else 0
+                        valor_total += valor_comercializacion
+                        
+                        # Obtener el estado más reciente de esta comercialización
+                        estado_mas_reciente = db.query(models.Estado).filter(
+                            models.Estado.idComercializacion == comercializacion.id,
+                            models.Estado.Fecha.isnot(None)
+                        ).order_by(models.Estado.Fecha.desc()).first()
+                        
+                        # Crear objeto comercialización detallado
+                        comercializacion_detalle = {
+                            "id_comercializacion": comercializacion.id,
+                            "codigo_cotizacion": comercializacion.CodigoCotizacion,
+                            "fecha_inicio": comercializacion.FechaInicio.isoformat() if comercializacion.FechaInicio else None,
+                            "valor_venta": valor_comercializacion,
+                            "es_sence": bool(comercializacion.EsSENCE),
+                            "lider_comercial": comercializacion.LiderComercial,
+                            "estado_actual": estado_mas_reciente.Estado if estado_mas_reciente else None,
+                            "fecha_ultimo_estado": estado_mas_reciente.Fecha.isoformat() if estado_mas_reciente and estado_mas_reciente.Fecha else None,
+                            "descripcion_estado": _obtener_descripcion_estado(estado_mas_reciente.Estado) if estado_mas_reciente else "Sin estado registrado"
+                        }
+                        
+                        # Clasificar como pendiente o terminada
+                        if not estado_mas_reciente or estado_mas_reciente.Estado != 1:
+                            comercializaciones_pendientes.append(comercializacion_detalle)
+                            valor_pendiente += valor_comercializacion
+                        else:
+                            comercializaciones_terminadas.append(comercializacion_detalle)
+                    
+                    # Crear objeto cotización completo
+                    cotizacion_completa = {
+                        "codigo_cotizacion": codigo_cotizacion,
+                        "ultima_fecha": ultima_fecha_cotizacion.isoformat() if ultima_fecha_cotizacion else None,
+                        "es_sence": es_sence,
+                        "tipo_cliente": "SENCE" if es_sence else "COMERCIAL",
+                        "estadisticas_cotizacion": {
+                            "total_comercializaciones": len(comercializaciones),
+                            "comercializaciones_pendientes": len(comercializaciones_pendientes),
+                            "comercializaciones_terminadas": len(comercializaciones_terminadas),
+                            "valor_total_cotizacion": round(valor_total, 2),
+                            "valor_pendiente_cotizacion": round(valor_pendiente, 2),
+                            "valor_terminado_cotizacion": round(valor_total - valor_pendiente, 2),
+                            "porcentaje_pendiente": round((len(comercializaciones_pendientes) / len(comercializaciones)) * 100, 1) if comercializaciones else 0,
+                            "porcentaje_completado": round((len(comercializaciones_terminadas) / len(comercializaciones)) * 100, 1) if comercializaciones else 0
+                        },
+                        "comercializaciones_pendientes": comercializaciones_pendientes,
+                        "comercializaciones_terminadas": comercializaciones_terminadas,
+                        "lideres_comerciales_involucrados": list(set(c.LiderComercial for c in comercializaciones if c.LiderComercial))
+                    }
+                    
+                    cotizaciones_detalle.append(cotizacion_completa)
+                    total_cotizaciones_global += 1
+                    total_comercializaciones_pendientes_global += len(comercializaciones_pendientes)
+                
+                # 5. CALCULAR ESTADÍSTICAS DEL CLIENTE
+                total_comercializaciones_cliente = sum(len(c["comercializaciones"]) for c in cotizaciones_dict.values())
+                total_pendientes_cliente = sum(len(cot["comercializaciones_pendientes"]) for cot in cotizaciones_detalle)
+                total_terminadas_cliente = sum(len(cot["comercializaciones_terminadas"]) for cot in cotizaciones_detalle)
+                valor_total_cliente = sum(cot["estadisticas_cotizacion"]["valor_total_cotizacion"] for cot in cotizaciones_detalle)
+                valor_pendiente_cliente = sum(cot["estadisticas_cotizacion"]["valor_pendiente_cotizacion"] for cot in cotizaciones_detalle)
+                
+                # Calcular días desde última actividad
+                todas_fechas = []
+                for cotizacion in cotizaciones_detalle:
+                    if cotizacion["ultima_fecha"]:
+                        todas_fechas.append(datetime.fromisoformat(cotizacion["ultima_fecha"].replace('Z', '+00:00')).date())
+                
+                dias_desde_ultima_actividad = None
+                if todas_fechas:
+                    fecha_mas_reciente = max(todas_fechas)
+                    dias_desde_ultima_actividad = (datetime.now().date() - fecha_mas_reciente).days
+                
+                # Determinar tipo predominante de cliente
+                total_sence = sum(cot["estadisticas_cotizacion"]["total_comercializaciones"] for cot in cotizaciones_detalle if cot["es_sence"])
+                tipo_cliente_predominante = "SENCE" if total_sence > (total_comercializaciones_cliente / 2) else "COMERCIAL"
+                
+                # 6. CREAR OBJETO CLIENTE COMPLETO
+                cliente_data = {
+                    "cliente_id": cliente_id,
+                    "cliente_nombre": cliente_nombre,
+                    "cotizaciones": cotizaciones_detalle,
+                    "resumen_cliente": {
+                        "total_cotizaciones": len(cotizaciones_detalle),
+                        "total_comercializaciones": total_comercializaciones_cliente,
+                        "comercializaciones_pendientes_total": total_pendientes_cliente,
+                        "comercializaciones_terminadas_total": total_terminadas_cliente,
+                        "valor_total_cliente": round(valor_total_cliente, 2),
+                        "valor_pendiente_cliente": round(valor_pendiente_cliente, 2),
+                        "valor_terminado_cliente": round(valor_total_cliente - valor_pendiente_cliente, 2),
+                        "porcentaje_pendiente_cliente": round((total_pendientes_cliente / total_comercializaciones_cliente) * 100, 1) if total_comercializaciones_cliente > 0 else 0,
+                        "porcentaje_completado_cliente": round((total_terminadas_cliente / total_comercializaciones_cliente) * 100, 1) if total_comercializaciones_cliente > 0 else 0,
+                        "dias_desde_ultima_actividad": dias_desde_ultima_actividad,
+                        "tipo_cliente_predominante": tipo_cliente_predominante,
+                        "porcentaje_sence": round((total_sence / total_comercializaciones_cliente) * 100, 1) if total_comercializaciones_cliente > 0 else 0,
+                        "cotizaciones_con_pendientes": len([cot for cot in cotizaciones_detalle if cot["estadisticas_cotizacion"]["comercializaciones_pendientes"] > 0]),
+                        "cotizaciones_completadas": len([cot for cot in cotizaciones_detalle if cot["estadisticas_cotizacion"]["comercializaciones_pendientes"] == 0]),
+                        "tiene_datos": True
+                    }
+                }
+                
+                clientes_detalle.append(cliente_data)
+                total_clientes_con_datos += 1
+                
+            except Exception as e:
+                logger.warning(f"Error procesando cliente {cliente_id}: {e}")
+                
+                if incluir_sin_datos:
+                    clientes_detalle.append({
+                        "cliente_id": cliente_id,
+                        "cliente_nombre": cliente_nombre,
+                        "cotizaciones": [],
+                        "resumen_cliente": {
+                            "error": str(e),
+                            "tiene_datos": False
+                        },
+                        "error_procesamiento": str(e)
+                    })
+                    total_clientes_sin_datos += 1
+        
+        # 7. CALCULAR ESTADÍSTICAS GENERALES
+        if clientes_detalle:
+            clientes_validos = [c for c in clientes_detalle if c["resumen_cliente"].get("tiene_datos", False)]
+            
+            if clientes_validos:
+                estadisticas_generales = {
+                    "promedio_cotizaciones_por_cliente": round(
+                        sum(c["resumen_cliente"]["total_cotizaciones"] for c in clientes_validos) / len(clientes_validos), 2
+                    ),
+                    "promedio_comercializaciones_por_cliente": round(
+                        sum(c["resumen_cliente"]["total_comercializaciones"] for c in clientes_validos) / len(clientes_validos), 2
+                    ),
+                    "promedio_pendientes_por_cliente": round(
+                        sum(c["resumen_cliente"]["comercializaciones_pendientes_total"] for c in clientes_validos) / len(clientes_validos), 2
+                    ),
+                    "promedio_valor_total_por_cliente": round(
+                        sum(c["resumen_cliente"]["valor_total_cliente"] for c in clientes_validos) / len(clientes_validos), 2
+                    ),
+                    "promedio_valor_pendiente_por_cliente": round(
+                        sum(c["resumen_cliente"]["valor_pendiente_cliente"] for c in clientes_validos) / len(clientes_validos), 2
+                    ),
+                    "promedio_dias_desde_ultima_actividad": round(
+                        sum(c["resumen_cliente"]["dias_desde_ultima_actividad"] 
+                            for c in clientes_validos 
+                            if c["resumen_cliente"]["dias_desde_ultima_actividad"] is not None
+                        ) / len([c for c in clientes_validos if c["resumen_cliente"]["dias_desde_ultima_actividad"] is not None]), 1
+                    ) if any(c["resumen_cliente"]["dias_desde_ultima_actividad"] is not None for c in clientes_validos) else None,
+                    "distribucion_tipo_cliente": {
+                        "SENCE": len([c for c in clientes_validos if c["resumen_cliente"]["tipo_cliente_predominante"] == "SENCE"]),
+                        "COMERCIAL": len([c for c in clientes_validos if c["resumen_cliente"]["tipo_cliente_predominante"] == "COMERCIAL"])
+                    }
+                }
+            else:
+                estadisticas_generales = {"mensaje": "No hay clientes válidos para calcular estadísticas"}
+        else:
+            estadisticas_generales = {"mensaje": "No se procesaron clientes"}
+        
+        # Top 10 clientes con más cotizaciones pendientes
+        clientes_ordenados_pendientes = sorted(
+            [c for c in clientes_detalle if c["resumen_cliente"].get("comercializaciones_pendientes_total", 0) > 0],
+            key=lambda x: x["resumen_cliente"]["comercializaciones_pendientes_total"],
+            reverse=True
+        )
+        top_10_pendientes = clientes_ordenados_pendientes[:10]
+        
+        # Top 10 clientes con mayor valor pendiente
+        clientes_ordenados_valor = sorted(
+            [c for c in clientes_detalle if c["resumen_cliente"].get("valor_pendiente_cliente", 0) > 0],
+            key=lambda x: x["resumen_cliente"]["valor_pendiente_cliente"],
+            reverse=True
+        )
+        top_10_valor_pendiente = clientes_ordenados_valor[:10]
+        
+        # Top 10 clientes más antiguos (sin actividad reciente)
+        clientes_con_dias = [
+            c for c in clientes_detalle 
+            if c["resumen_cliente"].get("dias_desde_ultima_actividad") is not None
+        ]
+        clientes_mas_antiguos = sorted(
+            clientes_con_dias,
+            key=lambda x: x["resumen_cliente"]["dias_desde_ultima_actividad"],
+            reverse=True
+        )[:10]
+        
+        # 8. RESPUESTA FINAL
+        response_data = {
+            "clientes_detalle": clientes_detalle,
+            "resumen": {
+                "total_clientes_procesados": len(clientes_unicos),
+                "clientes_con_datos": total_clientes_con_datos,
+                "clientes_sin_datos": total_clientes_sin_datos,
+                "total_cotizaciones": total_cotizaciones_global,
+                "total_comercializaciones_pendientes": total_comercializaciones_pendientes_global,
+                "promedio_cotizaciones_por_cliente": round(total_cotizaciones_global / total_clientes_con_datos, 2) if total_clientes_con_datos > 0 else 0,
+                "promedio_pendientes_por_cliente": round(total_comercializaciones_pendientes_global / total_clientes_con_datos, 2) if total_clientes_con_datos > 0 else 0,
+                "clientes_con_pendientes": len([c for c in clientes_detalle if c["resumen_cliente"].get("comercializaciones_pendientes_total", 0) > 0]),
+                "clientes_sin_pendientes": len([c for c in clientes_detalle if c["resumen_cliente"].get("comercializaciones_pendientes_total", 0) == 0])
+            },
+            "estadisticas_generales": estadisticas_generales,
+            "top_10_clientes_mas_pendientes": [
+                {
+                    "cliente_id": c["cliente_id"],
+                    "cliente_nombre": c["cliente_nombre"],
+                    "comercializaciones_pendientes": c["resumen_cliente"]["comercializaciones_pendientes_total"],
+                    "cotizaciones_con_pendientes": c["resumen_cliente"]["cotizaciones_con_pendientes"],
+                    "valor_pendiente": c["resumen_cliente"]["valor_pendiente_cliente"],
+                    "dias_desde_ultima_actividad": c["resumen_cliente"]["dias_desde_ultima_actividad"]
+                }
+                for c in top_10_pendientes
+            ],
+            "top_10_clientes_mayor_valor_pendiente": [
+                {
+                    "cliente_id": c["cliente_id"],
+                    "cliente_nombre": c["cliente_nombre"],
+                    "valor_pendiente": c["resumen_cliente"]["valor_pendiente_cliente"],
+                    "comercializaciones_pendientes": c["resumen_cliente"]["comercializaciones_pendientes_total"],
+                    "porcentaje_pendiente": c["resumen_cliente"]["porcentaje_pendiente_cliente"]
+                }
+                for c in top_10_valor_pendiente
+            ],
+            "top_10_clientes_mas_antiguos": [
+                {
+                    "cliente_id": c["cliente_id"],
+                    "cliente_nombre": c["cliente_nombre"],
+                    "dias_desde_ultima_actividad": c["resumen_cliente"]["dias_desde_ultima_actividad"],
+                    "total_cotizaciones": c["resumen_cliente"]["total_cotizaciones"],
+                    "pendientes": c["resumen_cliente"]["comercializaciones_pendientes_total"]
+                }
+                for c in clientes_mas_antiguos
+            ],
+            "configuracion": {
+                "limite_procesado": limite,
+                "incluir_sin_datos": incluir_sin_datos,
+                "solo_activos_recientes": solo_activos_recientes,
+                "filtros_aplicados": ["ADI%", "OTR%", "SPD%"],
+                "criterio_pendiente": "Comercializaciones sin estado = 1 (terminada)",
+                "agrupacion": "Por código de cotización"
+            },
+            "fecha_consulta": datetime.now().isoformat()
+        }
+        
+        logger.info(f"Consulta exitosa: {total_clientes_con_datos} clientes con datos, {total_cotizaciones_global} cotizaciones, {total_comercializaciones_pendientes_global} comercializaciones pendientes")
+        return response_data
+        
+    except Exception as e:
+        logger.error(f"Error en endpoint clientes/cotizaciones_y_comercializaciones_detalle: {e}")
         raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
