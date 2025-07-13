@@ -201,16 +201,12 @@ El proyecto incluye `generar_proyecciones_2025_2026.py` que genera gráficos de 
 python generar_proyecciones_2025_2026.py
 ```
 
-Genera visualizaciones de:
-- Proyección mensual comparativa 2025-2026
-- Totales anuales estimados
-- Análisis de tendencias
 
 ## Estado del Proyecto
 
 **COMPLETADO Y FUNCIONAL**
 - ✅ Backend unificado operativo
-- ✅ Modelo ML integrado y validado
+- ✅ Modelo ML integrado y validado (modelo_hibrido_mejorado.pkl)
 - ✅ Todos los endpoints funcionando
 - ✅ Documentación automática generada
 - ✅ Base de datos con datos reales cargados
@@ -228,12 +224,16 @@ Genera visualizaciones de:
 - Filtrado de clientes que no han completado pagos
 - Fallbacks seguros para campos faltantes (CorreoCreador → LiderComercial)
 
+### Nota Importante
+- Cabe destacar que como es un prototipo, hay que probar mas los endpoint desarrollados, ya que en algunos casos pueden confundir al modelo y no dar la misma respuesta.
+
 ---
 
 **Desarrollado para HACKADISC 2025**
 
 *Sebastian Concha M. / ML Engineer* 
-
-Cualquier Duda contactarse con él
+*Fernando Condori / Full Stack Developer
+*Vicente Araya / Full Stack Developer*
+Cualquier Duda contactarse con el ML Engineer 
 
 
