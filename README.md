@@ -306,6 +306,4 @@ El uso, modificación, distribución o reproducción del modelo y sus algoritmos
 *Sebastian Concha M. / ML Engineer* 
 *Fernando Condori / Full Stack Developer
 *Vicente Araya / Full Stack Developer*
-Cualquier Duda contactarse con el ML Engineer 
-
 
