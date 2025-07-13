@@ -48,6 +48,8 @@ BackEnd-HackADisc/
 ### Origen del Modelo
 El modelo fue entrenado utilizando datos históricos reales de comercializaciones completamente pagadas, aplicando técnicas de ingeniería de características avanzadas y validación temporal para asegurar robustez predictiva en escenarios de producción.
 
+**Propiedad Intelectual:** El modelo de Machine Learning, así como el algoritmo y metodología de entrenamiento utilizados, son propiedad intelectual exclusiva de Sebastian Concha M., ML Engineer del proyecto HACKADISC.
+
 ## API Endpoints
 
 ### Endpoints Principales
@@ -201,6 +203,63 @@ El proyecto incluye `generar_proyecciones_2025_2026.py` que genera gráficos de 
 python generar_proyecciones_2025_2026.py
 ```
 
+Genera visualizaciones de:
+- Proyección mensual comparativa 2025-2026
+- Totales anuales estimados
+- Análisis de tendencias
+
+## Validación y Consulta Directa del Modelo
+
+### Scripts de Validación Incluidos
+
+El proyecto incluye herramientas para validar y consultar directamente el modelo ML sin pasar por la API:
+
+#### 1. Validación Completa del Modelo
+```bash
+python validar_modelo_directo.py
+```
+
+**Características:**
+- Carga el modelo directamente desde archivos .pkl
+- Ejecuta predicciones con datos de prueba predefinidos
+- Compara resultados con respuestas de la API
+- Detecta automáticamente discrepancias entre implementaciones
+- Muestra métricas y percentiles utilizados
+
+#### 2. Consulta Interactiva del Modelo
+```bash
+python consulta_modelo_interactiva.py
+```
+
+**Características:**
+- Interfaz interactiva amigable para el usuario
+- Permite ingresar datos personalizados
+- Incluye ejemplos predefinidos para pruebas rápidas
+- Muestra información detallada del modelo
+- Ideal para validación manual y exploración
+
+### Endpoints de Validación en la API
+
+```bash
+# Test rápido del modelo
+curl "http://localhost:8000/modelo/test"
+
+# Información detallada del modelo
+curl "http://localhost:8000/modelo/info"
+
+# Predicción específica para validar
+curl -X POST "http://localhost:8000/predecir" \
+     -H "Content-Type: application/json" \
+     -d '{"cliente":"TEST","correo_creador":"test@test.cl","valor_venta":1000000,"es_sence":true,"mes_facturacion":7,"cantidad_facturas":2}'
+```
+
+### Casos de Uso para Validación
+
+- **Validación técnica profunda:** Usar `validar_modelo_directo.py`
+- **Pruebas interactivas:** Usar `consulta_modelo_interactiva.py`
+- **Integración con sistemas:** Usar endpoints de la API
+- **Debug de discrepancias:** Comparar resultados directos vs API
+
 
 ## Estado del Proyecto
 
@@ -226,6 +285,19 @@ python generar_proyecciones_2025_2026.py
 
 ### Nota Importante
 - Cabe destacar que como es un prototipo, hay que probar mas los endpoint desarrollados, ya que en algunos casos pueden confundir al modelo y no dar la misma respuesta.
+
+## Propiedad Intelectual
+
+**IMPORTANTE:** El modelo de Machine Learning implementado en este proyecto, incluyendo:
+- Algoritmo Random Forest híbrido y su configuración específica
+- Metodología de entrenamiento y validación temporal
+- Técnicas de ingeniería de características aplicadas
+- Lógica de clasificación de riesgo y percentiles
+- Archivos del modelo entrenado (.pkl)
+
+**Son propiedad intelectual exclusiva de Sebastian Concha M., ML Engineer.**
+
+El uso, modificación, distribución o reproducción del modelo y sus algoritmos requiere autorización expresa del propietario intelectual.
 
 ---
 
