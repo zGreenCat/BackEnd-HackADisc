@@ -284,7 +284,7 @@ curl -X POST "http://localhost:8000/predecir" \
 - Fallbacks seguros para campos faltantes (CorreoCreador → LiderComercial)
 
 ### Nota Importante
-- Cabe destacar que como es un prototipo, hay que probar mas los endpoint desarrollados, ya que en algunos casos pueden confundir al modelo y no dar la misma respuesta.
+- Cabe destacar que como es un prototipo, hay que probar de manera exhaustiva los endpoint (API) desarrollados , ya que en algunos casos pueden confundir al modelo y no dar la misma respuesta.
 
 ## Propiedad Intelectual
 
