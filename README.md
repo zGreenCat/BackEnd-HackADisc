@@ -303,7 +303,7 @@ El uso, modificación, distribución o reproducción del modelo y sus algoritmos
 
 **Desarrollado para HACKADISC 2025**
 
-*Sebastian Concha M. / ML Engineer* 
-*Fernando Condori / Full Stack Developer*
-*Vicente Araya / Full Stack Developer*
+*Sebastian Concha M. / ML Engineer*
+*Fernando Condori G. / Full Stack Developer*
+*Vicente Araya R. / Full Stack Developer*
 
