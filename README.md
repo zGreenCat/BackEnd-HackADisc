@@ -295,7 +295,7 @@ curl -X POST "http://localhost:8000/predecir" \
 - Lógica de clasificación de riesgo y percentiles
 - Archivos del modelo entrenado (.pkl)
 
-**Son propiedad intelectual exclusiva de Sebastian Concha M., ML Engineer.**
+**Son propiedad intelectual de Sebastian Concha M., ML Engineer.**
 
 El uso, modificación, distribución o reproducción del modelo y sus algoritmos requiere autorización expresa del propietario intelectual.
 
